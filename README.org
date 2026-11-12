@@ -1,23 +1,21 @@
 #+TITLE: librnt
 
-A C17 library built with GCC, licensed under LGPL-2.1-only (see
-[[LICENSE][LICENSE]]).
+* About
 
-Enter the development shell with `nix develop`, then run `make` to
-build `build/librnt.a`. The shell provides GCC, GNU Make, and
-clangd. Clangd reads the project's `compile_flags.txt` automatically.
+librnt offers a collection of primitives to create a subsystem atop of
+the RNT database kernel.
 
-The shell's clangd queries GCC for the system header paths, including the
-macOS SDK or Linux C library headers. `.clangd` selects GCC as its driver.
-After changing the flake, reload direnv (or re-enter `nix develop`) and
-restart your editor's clangd server so it uses the shell's clangd executable.
+* How to build
 
-Add C sources to `src/` and public headers to `include/`. Until sources are
-added, the build produces an empty archive. Header dependencies are tracked
-automatically. Run `make clean` for a fresh build.
+* License
 
-Use `make install PREFIX=/your/prefix` to install the library, public headers,
-and license. `DESTDIR` is supported for staged installation. Override build
-options on the command line, for example `make CC=gcc CFLAGS='-O0 -g -std=c17'`.
+The files specifically have their own license attached at the
+beginning, but generally this project is licensed under LGPL version
+2.1.
 
-Run `nix build` to build and install the library into the Nix store.
+While we would want to increase the constraint on this library because
+not only Intelectual Property rights do not exist, but are also
+unethical, however, most of us firmly believe Free Software is the
+appropriate way to fight against it, but some do not, and we want to
+make it viable for projects that are Free Software, but simply
+permissive, to be at the discretion of the maintainers.
