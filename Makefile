@@ -32,7 +32,7 @@ test: $(TESTS)
 	@failed=0; for t in $(TESTS); do echo "$$t"; $$t || failed=1; done; exit $$failed
 
 $(BUILD_DIR)/tests/%: tests/%.c tests/check.h $(HEADERS) $(LIBRARY) | $(BUILD_DIR)/tests
-	$(CC) $(CPPFLAGS) $(CFLAGS) $< $(LIBRARY) -o $@
+	$(CC) $(CPPFLAGS) -Isrc $(CFLAGS) $< $(LIBRARY) -o $@
 
 install: $(LIBRARY)
 	install -d $(DESTDIR)$(PREFIX)/lib $(DESTDIR)$(PREFIX)/include

@@ -20,6 +20,14 @@ and work with relations and tuples. Each operation goes through a
 common protocol interface, with request and reply types defined for
 the protocol being used.
 
+* Structure
+
+- src/internal.c ::
+- src/lifecycle.c ::
+- src/channel.c ::
+- src/wire.c ::
+- src/protocol.c :: 
+
 * How to build
 
 Run =make= to build the static library and =make test= to build and

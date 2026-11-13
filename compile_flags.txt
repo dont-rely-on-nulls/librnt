@@ -4,3 +4,4 @@
 -Wextra
 -Wpedantic
 -Iinclude
+-Isrc
