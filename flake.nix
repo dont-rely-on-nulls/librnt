@@ -34,7 +34,7 @@
 
             meta = {
               description = "librnt C library";
-              license = pkgs.lib.licenses.lgpl21Only;
+              license = pkgs.lib.licenses.lgpl3Plus;
               platforms = systems;
             };
           };

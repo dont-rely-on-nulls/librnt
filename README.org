@@ -2,16 +2,36 @@
 
 * About
 
-librnt offers a collection of primitives to create a subsystem atop of
-the RNT database kernel.
+#+begin_export html
+<div class="project-badges" aria-label="Project badges">
+  <a href="https://www.gnu.org/licenses/lgpl-3.0.html"><img alt="LGPL v3 or later" height="40" src="https://thumb.wikimedia.org/wikipedia/commons/thumb/3/3b/LGPLv3_Logo.svg/3840px-LGPLv3_Logo.svg.png" /></a>
+  <a href="https://builtwithnix.org"><img alt="Built with Nix" height="40" src="https://builtwithnix.org/badge.svg" /></a>
+</div>
+#+end_export
+
+=librnt= is the C interface for building subsystems atop the RNT
+database kernel. It provides the subsystem's side of RNT's native
+protocol, as to manage the lifecycle with an initial handle,
+discovering kernel objects, and performing operations on them.
+
+The interface brings together named objects and relational data.
+Subsystems use handles to navigate directories, manage name bindings,
+and work with relations and tuples. Each operation goes through a
+common protocol interface, with request and reply types defined for
+the protocol being used.
 
 * How to build
+
+Run =make= to build the static library and =make test= to build and
+run the tests. A C17 compiler and GNU Make are required. Use
+=CC=clang= to select Clang instead of GCC (not recommended).
 
 * License
 
 The files specifically have their own license attached at the
-beginning, but generally this project is licensed under LGPL version
-2.1.
+beginning, but generally this project is licensed under the GNU Lesser
+General Public License version 3 or, at your option, any later version
+(SPDX: LGPL-3.0-or-later). See =LICENSE= for the license text.
 
 While we would want to increase the constraint on this library because
 not only Intelectual Property rights do not exist, but are also
