@@ -1,5 +1,6 @@
 #include <errno.h>
 #include <limits.h>
+
 #include <stddef.h>
 #include <stdlib.h>
 #include <signal.h>
@@ -14,16 +15,21 @@ struct rnt_channel {
   endpoint at;
 };
 
+/* Takes ownership over the file descriptor so our programs don't
+   think the pipe is theirs too. */
 static void claim(void) {
   struct sigaction current;
-  unsetenv("RNT_CHHANNEL");
+  unsetenv("RNT_CHANNEL");
+  // If nobody has setup handling for sigpipe, ignore it. Writing to a
+  // pipe with the other end closes kills the program, normally, but
+  // ignoring the signal makes write return an error instead.
   if (sigaction(SIGPIPE, NULL, &current) == 0 && current.sa_handler == SIG_DFL)
     signal(SIGPIPE, SIG_IGN);
 }
 
 static bool endpoint_of(unsigned long long number, endpoint *at) {
   *at = (int)number;
-  return (int)number <= INT_MAX;
+  return number <= INT_MAX;
 }
 
 static long long transfer(endpoint at, void *bytes, size_t length,
@@ -70,7 +76,7 @@ rnt_channel *rnt_channel_open(void) {
 }
 
 bool rnt_channel_send(rnt_channel *channel, const rnt_buffer *frame) {
-  all(channel, frame->bytes, frame->length, true);
+  return all(channel, frame->bytes, frame->length, true);
 }
 
 bool rnt_channel_receive(rnt_channel *channel, rnt_buffer *frame) {
@@ -91,7 +97,8 @@ bool rnt_channel_receive(rnt_channel *channel, rnt_buffer *frame) {
 }
 
 void rnt_channel_close(rnt_channel *channel) {
-  finish(channel->at);
-  free(channel);
-  return;  
+  if(channel){
+    finish(channel->at);
+    free(channel);
+  }
 }
