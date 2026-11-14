@@ -30,17 +30,20 @@ typedef struct rnt_handle rnt_handle;
 
 enum rnt_status {
   RNT_STATUS_OK = 1,
-  RNT_STATUS_NOT_FOUND,   /* the name names nothing under the handle */
-  RNT_STATUS_UNSUPPORTED, /* the handle does not support that protocol */
-  RNT_STATUS_REFUSED,     /* the kernel refused the change */
-  RNT_STATUS_DISCONNECTED /* the kernel is gone, or we were unplugged */
+  RNT_STATUS_NOT_FOUND,    /* the name names nothing under the handle */
+  RNT_STATUS_UNSUPPORTED,  /* the handle does not support that protocol */
+  RNT_STATUS_REFUSED,      /* the kernel refused the change */
+  RNT_STATUS_DISCONNECTED, /* the kernel is gone, or we were unplugged */
+  RNT_STATUS_INVALID,      /* the request cannot be written, nor sent */
+  RNT_STATUS_NO_MEMORY     /* librnt ran out of memory */
 };
 
 /* Lifecycle
 
    Starting initializes the subsystem upon registration or by request
    of a supervisor to restart, giving its first handle. Every other
-   handle is retrieved through it. */
+   handle is retrieved through it. A subsystem starts once per
+   process, so restarting it means starting a new process. */
 enum rnt_status rnt_start(const char *name, rnt_handle **root);
 
 void rnt_release(rnt_handle *handle);
@@ -126,15 +129,16 @@ typedef struct {
    Everything asked of an object goes through the one execution path,
    where each protocol below, for each operation, describes what its
    request and reply point to, and NULL where it takes or gives
-   nothing. A handle given in a reply is under the caller's
-   jurisdiction to release. */
+   nothing. A reply may be NULL whenever its result is not wanted. A
+   handle given in a reply is under the caller's jurisdiction to
+   release, and is NULL unless the call succeeds. */
 enum rnt_protocol {
   RNT_PROTOCOL_DIRECTORY = 1,
   RNT_PROTOCOL_REGISTRY,
   RNT_PROTOCOL_ASSOCIATIVE,
   RNT_PROTOCOL_RELATION,
   RNT_PROTOCOL_CURSOR
-  // There are many more, but these for now are fine.      
+  // There are many more, but these for now are fine.
 };
 
 enum rnt_status rnt_execute_protocol(const rnt_handle *handle,
