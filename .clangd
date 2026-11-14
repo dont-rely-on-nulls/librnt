@@ -1,2 +1,4 @@
 CompileFlags:
   Compiler: gcc
+  # GCC's stddef.h uses __float128 on Apple Silicon, which Clang cannot parse.
+  BuiltinHeaders: Clangd
