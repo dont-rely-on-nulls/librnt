@@ -5,7 +5,7 @@
 static void start_without_kernel(void) {
   rnt_handle *root = NULL;
 
-  CHECK(rnt_start("test", &root) == RNT_STATUS_DISCONNECTED);
+  CHECK(rnt_start("test", NULL, NULL, &root) == RNT_STATUS_DISCONNECTED);
   CHECK(root == NULL);
 }
 

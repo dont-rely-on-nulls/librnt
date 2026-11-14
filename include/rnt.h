@@ -43,8 +43,28 @@ enum rnt_status {
    Starting initializes the subsystem upon registration or by request
    of a supervisor to restart, giving its first handle. Every other
    handle is retrieved through it. A subsystem starts once per
-   process, so restarting it means starting a new process. */
-enum rnt_status rnt_start(const char *name, rnt_handle **root);
+   process, so restarting it means starting a new process, and
+   starting again is refused.
+
+   The kernel stops the subsystem when it unplugs it. The stopping
+   body runs first, while the kernel can still be called, so the
+   subsystem shuts down gracefully, and once it returns every call is
+   disconnected. The body may be NULL. Stopping on one's own is for a
+   subsystem that leaves by itself, after its own cleanup. Either
+   way, handles are still released, which then only frees them.
+
+   Serving waits for the kernel's requests and answers them, for a
+   subsystem with nothing else to do. It gives OK once the kernel
+   stops the subsystem, and DISCONNECTED if the kernel is gone
+   without asking. */
+typedef void (*rnt_stop_body)(void *data);
+
+enum rnt_status rnt_start(const char *name, rnt_stop_body stopping,
+                          void *data, rnt_handle **root);
+
+enum rnt_status rnt_serve(void);
+
+void rnt_stop(void);
 
 void rnt_release(rnt_handle *handle);
 
