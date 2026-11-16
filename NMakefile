@@ -1,0 +1,40 @@
+# NMakefile: building with MSVC, from a Developer Command Prompt.
+#   nmake /f NMakefile         builds build\rnt.lib
+#   nmake /f NMakefile test    builds and runs the tests
+# NMake has no wildcards for this, so a new source or test is listed
+# here by hand.
+
+CC = cl
+LIBEXE = lib
+
+CFLAGS = /nologo /std:c17 /W4 /O2 /Z7 /Iinclude /D_CRT_SECURE_NO_WARNINGS
+
+LIBRARY = build\rnt.lib
+OBJECTS = build\channel.obj build\lifecycle.obj build\protocol.obj \
+	build\session.obj build\wire.obj
+HEADERS = include\channel.h include\internal.h include\rnt.h include\wire.h
+TESTS = build\tests\start.exe
+
+all: $(LIBRARY)
+
+$(LIBRARY): $(OBJECTS) NMakefile
+	$(LIBEXE) /nologo /out:$@ $(OBJECTS)
+
+$(OBJECTS): $(HEADERS) NMakefile
+
+{src}.c{build}.obj::
+	@if not exist build mkdir build
+	$(CC) $(CFLAGS) /c /Fobuild\ $<
+
+# Runs every test program, stopping at the first that fails.
+test: $(TESTS)
+	!$**
+
+$(TESTS): tests\check.h $(HEADERS) $(LIBRARY)
+
+{tests}.c{build\tests}.exe:
+	@if not exist build\tests mkdir build\tests
+	$(CC) $(CFLAGS) /Isrc /Fobuild\tests\ /Fe$@ $< $(LIBRARY)
+
+clean:
+	@if exist build rmdir /s /q build

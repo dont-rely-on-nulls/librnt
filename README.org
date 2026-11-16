@@ -34,6 +34,9 @@ Run =make= to build the static library and =make test= to build and
 run the tests. A C17 compiler and GNU Make are required. Use
 =CC=clang= to select Clang instead of GCC (not recommended).
 
+On Windows, =nmake /f NMakefile= should be used to build with MSVC
+and =nmake /f NMakefile test= for the tests.
+
 * License
 
 The files specifically have their own license attached at the

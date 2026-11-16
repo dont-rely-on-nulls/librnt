@@ -1,20 +1,54 @@
 #include <errno.h>
-#include <limits.h>
-#include <poll.h>
-
 #include <stddef.h>
 #include <stdlib.h>
-#include <signal.h>
-#include <unistd.h>
 
 #include "channel.h"
 #include "wire.h"
 
-typedef int endpoint;
+#ifdef _WIN32
+// To load less bloat
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
 
-struct rnt_channel {
-  endpoint at;
-};
+typedef HANDLE endpoint;
+
+/* Takes ownership over the handle so our programs don't think the
+   pipe is theirs too. */
+static void claim(void) { _putenv("RNT_CHANNEL="); }
+
+static bool endpoint_of(unsigned long long number, endpoint *at) {
+  *at = (HANDLE)(uintptr_t)number;
+  return number <= UINTPTR_MAX;
+}
+
+/* A pipe with its other end closed fails with ERROR_BROKEN_PIPE, which
+   is an error to us as much as an EOF would be. */
+static long long transfer(endpoint at, void *bytes, size_t length,
+                          bool writing) {
+  DWORD chunk = length > MAXDWORD ? MAXDWORD : (DWORD)length;
+  DWORD done = 0;
+  BOOL moved = writing ? WriteFile(at, bytes, chunk, &done, NULL)
+                       : ReadFile(at, bytes, chunk, &done, NULL);
+
+  return moved ? (long long)done : -1;
+}
+
+/* Peek fails once the other end is closed, which counts as pending
+   since receiving then fails as well. */
+static bool waiting(endpoint at) {
+  DWORD available = 0;
+
+  return !PeekNamedPipe(at, NULL, 0, NULL, &available, NULL) || available > 0;
+}
+
+static void finish(endpoint at) { CloseHandle(at); }
+#else
+#include <limits.h>
+#include <poll.h>
+#include <signal.h>
+#include <unistd.h>
+
+typedef int endpoint;
 
 /* Takes ownership over the file descriptor so our programs don't
    think the pipe is theirs too. */
@@ -42,7 +76,21 @@ static long long transfer(endpoint at, void *bytes, size_t length,
   return done;
 }
 
+static bool waiting(endpoint at) {
+  struct pollfd ready = {at, POLLIN, 0};
+  int count;
+  do {
+    count = poll(&ready, 1, 0);
+  } while (count < 0 && errno == EINTR);
+  return count != 0;
+}
+
 static void finish(endpoint at) { close(at); }
+#endif
+
+struct rnt_channel {
+  endpoint at;
+};
 
 static bool all(rnt_channel *channel, void *bytes, size_t length,
                 bool writing) {
@@ -98,12 +146,7 @@ bool rnt_channel_receive(rnt_channel *channel, rnt_buffer *frame) {
 }
 
 bool rnt_channel_pending(rnt_channel *channel) {
-  struct pollfd waiting = {channel->at, POLLIN, 0};
-  int ready;
-  do {
-    ready = poll(&waiting, 1, 0);
-  } while (ready < 0 && errno == EINTR);
-  return ready != 0;
+  return waiting(channel->at);
 }
 
 void rnt_channel_close(rnt_channel *channel) {
