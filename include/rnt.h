@@ -56,13 +56,17 @@ enum rnt_status {
    Serving waits for the kernel's requests and answers them, for a
    subsystem with nothing else to do. It gives OK once the kernel
    stops the subsystem, and DISCONNECTED if the kernel is gone
-   without asking. */
+   without asking. Polling answers only what the kernel has asked
+   already, for a subsystem busy with other things, and gives OK for
+   as long as the subsystem stays plugged. */
 typedef void (*rnt_stop_body)(void *data);
 
 enum rnt_status rnt_start(const char *name, rnt_stop_body stopping,
                           void *data, rnt_handle **root);
 
 enum rnt_status rnt_serve(void);
+
+enum rnt_status rnt_poll(void);
 
 void rnt_stop(void);
 
@@ -110,10 +114,14 @@ typedef struct {
 /* Objects
 
    An object here is one the subsystem holds in its own memory. The
-   kernel makes its own from it when it is registered. */
+   kernel makes its own from it when it is registered. A relation is
+   its heading and the tuples it holds, every one of them fitting the
+   heading, and none when there are no tuples. */
 typedef struct {
   const rnt_attribute *heading;
   size_t degree;
+  const rnt_tuple *tuples;
+  size_t cardinality;
 } rnt_relation;
 
 typedef struct {
@@ -157,7 +165,8 @@ enum rnt_protocol {
   RNT_PROTOCOL_REGISTRY,
   RNT_PROTOCOL_ASSOCIATIVE,
   RNT_PROTOCOL_RELATION,
-  RNT_PROTOCOL_CURSOR
+  RNT_PROTOCOL_CURSOR,
+  RNT_PROTOCOL_PROGRAM
   // There are many more, but these for now are fine.
 };
 
@@ -208,9 +217,23 @@ typedef struct {
 
 /* Relation
 
-   CURSOR    request NULL       reply rnt_handle *, the cursor
-   CONTAINS  request rnt_tuple  reply bool */
-enum rnt_relation_operation { RNT_RELATION_CURSOR = 1, RNT_RELATION_CONTAINS };
+   CURSOR    request NULL                  reply rnt_handle *, the cursor
+   CONTAINS  request rnt_tuple             reply bool
+   HEADING   request rnt_relation_heading  reply NULL
+             The body runs once for each attribute, until one fails. */
+enum rnt_relation_operation {
+  RNT_RELATION_CURSOR = 1,
+  RNT_RELATION_CONTAINS,
+  RNT_RELATION_HEADING
+};
+
+typedef enum rnt_status (*rnt_attribute_body)(const rnt_attribute *attribute,
+                                              void *data);
+
+typedef struct {
+  rnt_attribute_body body;
+  void *data;
+} rnt_relation_heading;
 
 /* Cursor
 
@@ -226,5 +249,43 @@ typedef struct {
   rnt_tuple_body body;
   void *data;
 } rnt_cursor_fetch;
+
+/* Program
+
+   EVALUATE  request rnt_program  reply rnt_handle *, the relation
+             Runs the source in the evaluator named, as
+             subsystem:language or as language alone for the system's,
+             with its paths read under the handle. */
+enum rnt_program_operation { RNT_PROGRAM_EVALUATE = 1 };
+
+typedef struct {
+  const char *evaluator;
+  const char *source;
+  const rnt_handle *const *inputs;
+  size_t arity;
+} rnt_program;
+
+/* Evaluators
+
+   A subsystem offers an evaluator for a language of its own before it
+   starts, and the kernel binds it under the subsystem's root as
+   evaluator\language, so a program anywhere names it as
+   subsystem:language. Whenever such a program runs, the kernel asks
+   the subsystem to evaluate it. The body is given the program, whose
+   evaluator is the language, and the handle its paths are read under,
+   all lent for as long as it runs. It answers once with the relation
+   the program stands for, which is sent at once, and a handle answered
+   with stays the body's to release after. A body that returns without
+   answering refuses the evaluation, with its failure if it failed. */
+typedef struct rnt_answer rnt_answer;
+
+typedef enum rnt_status (*rnt_evaluate_body)(const rnt_program *program,
+                                             const rnt_handle *within,
+                                             rnt_answer *answer, void *data);
+
+enum rnt_status rnt_offer(const char *language, rnt_evaluate_body body,
+                          void *data);
+
+enum rnt_status rnt_answer_with(rnt_answer *answer, const rnt_entry *relation);
 
 #endif

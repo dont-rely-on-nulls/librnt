@@ -36,6 +36,19 @@ static void tuple(rnt_buffer *buffer, const void *request) {
   rnt_wire_tuple(buffer, request);
 }
 
+/* Every input stands for an object, so a NULL one cannot be sent. */
+static void program(rnt_buffer *buffer, const void *request) {
+  const rnt_program *program = request;
+  rnt_wire_string(buffer, program->evaluator);
+  rnt_wire_string(buffer, program->source);
+  rnt_wire_list(buffer, program->arity);
+  for (size_t i = 0; i < program->arity; i++) {
+    if (!program->inputs[i] && !buffer->failure)
+      buffer->failure = RNT_STATUS_INVALID;
+    rnt_wire_handle(buffer, program->inputs[i]);
+  }
+}
+
 /* A limit past what the wire holds asks for the most it holds. */
 static void limit(rnt_buffer *buffer, const void *request) {
   const rnt_cursor_fetch *fetch = request;
@@ -129,6 +142,24 @@ static enum rnt_status tuples(rnt_session *session, rnt_reader *results,
   return status;
 }
 
+static enum rnt_status attributes(rnt_session *session, rnt_reader *results,
+                                  rnt_arena *arena, const void *request,
+                                  void *reply) {
+  const rnt_relation_heading *heading = request;
+  size_t count = rnt_read_list(results);
+  enum rnt_status status = RNT_STATUS_OK;
+  (void)reply;
+  for (size_t i = 0; i < count; i++) {
+    rnt_attribute read;
+    if (!rnt_read_attribute(results, arena, &read))
+      break;
+    if (status == RNT_STATUS_OK)
+      status = heading->body(&read, heading->data);
+    rnt_arena_clear(arena);
+  }
+  return whole(session, results, arena, status);
+}
+
 static const struct {
   enum rnt_protocol protocol;
   int operation;
@@ -142,7 +173,9 @@ static const struct {
      handle_of},
     {RNT_PROTOCOL_RELATION, RNT_RELATION_CURSOR, no_arguments, handle_of},
     {RNT_PROTOCOL_RELATION, RNT_RELATION_CONTAINS, tuple, truth},
+    {RNT_PROTOCOL_RELATION, RNT_RELATION_HEADING, no_arguments, attributes},
     {RNT_PROTOCOL_CURSOR, RNT_CURSOR_FETCH, limit, tuples},
+    {RNT_PROTOCOL_PROGRAM, RNT_PROGRAM_EVALUATE, program, handle_of},
 };
 
 /* Whether the handle supports the protocol is the kernel's to say, so

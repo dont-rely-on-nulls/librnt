@@ -1,9 +1,10 @@
 #include <stdlib.h>
+#include <string.h>
 
 #include "channel.h"
 #include "internal.h"
 
-enum { RNT_WIRE_VERSION = 1 };
+enum { RNT_WIRE_VERSION = 2 };
 
 static rnt_session session;
 
@@ -54,7 +55,34 @@ enum rnt_status rnt_start(const char *name, rnt_stop_body stopping,
   return status;
 }
 
+/* Offers are told to the kernel only as the subsystem starts, so none
+   is taken after, and a language is offered once. */
+enum rnt_status rnt_offer(const char *language, rnt_evaluate_body body,
+                          void *data) {
+  rnt_offering *grown;
+  char *copied;
+
+  if (session.started)
+    return RNT_STATUS_REFUSED;
+  if (!language || !*language || !body)
+    return RNT_STATUS_INVALID;
+  for (size_t i = 0; i < session.offered; i++)
+    if (strcmp(session.offers[i].language, language) == 0)
+      return RNT_STATUS_REFUSED;
+  grown = realloc(session.offers, (session.offered + 1) * sizeof *grown);
+  if (!grown)
+    return RNT_STATUS_NO_MEMORY;
+  session.offers = grown;
+  if (!(copied = malloc(strlen(language) + 1)))
+    return RNT_STATUS_NO_MEMORY;
+  strcpy(copied, language);
+  session.offers[session.offered++] = (rnt_offering){copied, body, data};
+  return RNT_STATUS_OK;
+}
+
 enum rnt_status rnt_serve(void) { return rnt_session_serve(&session); }
+
+enum rnt_status rnt_poll(void) { return rnt_session_poll(&session); }
 
 void rnt_stop(void) {
   if (session.channel)

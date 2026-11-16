@@ -14,13 +14,22 @@
    A session is the subsystem plugged into the kernel, one per
    process, and every handle points to it. The kernel unplugs it by
    asking, or the subsystem by stopping, and from then on its channel
-   is NULL and every call is disconnected. */
+   is NULL and every call is disconnected. Its offers are the
+   evaluators it brings, told to the kernel when it asks. */
+typedef struct {
+  char *language;
+  rnt_evaluate_body body;
+  void *data;
+} rnt_offering;
+
 typedef struct {
   struct rnt_channel *channel;
   uint64_t last_id;
   bool started;
   rnt_stop_body stopping;
   void *data;
+  rnt_offering *offers;
+  size_t offered;
 } rnt_session;
 
 /* The kernel numbers the handles it gives each subsystem, and a
@@ -43,6 +52,9 @@ enum rnt_status rnt_session_call(rnt_session *session,
 /* Serves what the kernel asks, the same way a call does while it
    waits, until the kernel stops the session or is gone. */
 enum rnt_status rnt_session_serve(rnt_session *session);
+
+/* Serves what the kernel has asked already, without waiting. */
+enum rnt_status rnt_session_poll(rnt_session *session);
 
 /* Closes the channel, and gives the status saying so. */
 enum rnt_status rnt_session_disconnect(rnt_session *session);

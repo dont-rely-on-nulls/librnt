@@ -122,5 +122,7 @@ void rnt_arena_free(rnt_arena *arena);
 const char *rnt_read_text(rnt_reader *reader, rnt_arena *arena);
 bool rnt_read_value(rnt_reader *reader, rnt_arena *arena, rnt_value *value);
 bool rnt_read_tuple(rnt_reader *reader, rnt_arena *arena, rnt_tuple *tuple);
+bool rnt_read_attribute(rnt_reader *reader, rnt_arena *arena,
+                        rnt_attribute *attribute);
 
 #endif

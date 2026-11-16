@@ -22,6 +22,9 @@ bool rnt_channel_send(rnt_channel *channel, const rnt_buffer *frame);
 
 bool rnt_channel_receive(rnt_channel *channel, rnt_buffer *frame);
 
+// Whether the kernel has sent something not yet received, or is gone.
+bool rnt_channel_pending(rnt_channel *channel);
+
 void rnt_channel_close(rnt_channel *channel);
 
 #endif

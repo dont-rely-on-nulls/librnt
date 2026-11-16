@@ -1,5 +1,6 @@
 #include <errno.h>
 #include <limits.h>
+#include <poll.h>
 
 #include <stddef.h>
 #include <stdlib.h>
@@ -94,6 +95,15 @@ bool rnt_channel_receive(rnt_channel *channel, rnt_buffer *frame) {
   }
   body = rnt_buffer_extend(frame, length);
   return body && all(channel, body, length, false);
+}
+
+bool rnt_channel_pending(rnt_channel *channel) {
+  struct pollfd waiting = {channel->at, POLLIN, 0};
+  int ready;
+  do {
+    ready = poll(&waiting, 1, 0);
+  } while (ready < 0 && errno == EINTR);
+  return ready != 0;
 }
 
 void rnt_channel_close(rnt_channel *channel) {

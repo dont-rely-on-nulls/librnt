@@ -176,6 +176,9 @@ void rnt_wire_relation(rnt_buffer *buffer, const rnt_relation *relation) {
   rnt_wire_list(buffer, relation->degree);
   for (size_t i = 0; i < relation->degree; i++)
     rnt_wire_attribute(buffer, &relation->heading[i]);
+  rnt_wire_list(buffer, relation->cardinality);
+  for (size_t i = 0; i < relation->cardinality; i++)
+    rnt_wire_tuple(buffer, &relation->tuples[i]);
 }
 
 void rnt_wire_multigroup(rnt_buffer *buffer, const rnt_multigroup *multigroup) {
@@ -390,5 +393,13 @@ bool rnt_read_tuple(rnt_reader *reader, rnt_arena *arena, rnt_tuple *tuple) {
   }
   tuple->fields = fields;
   tuple->degree = degree;
+  return !reader->failed;
+}
+
+bool rnt_read_attribute(rnt_reader *reader, rnt_arena *arena,
+                        rnt_attribute *attribute) {
+  expect(reader, 'a');
+  attribute->name = rnt_read_text(reader, arena);
+  attribute->domain = rnt_read_text(reader, arena);
   return !reader->failed;
 }
