@@ -30,12 +30,13 @@ the protocol being used.
 
 * How to build
 
-Run =make= to build the static library and =make test= to build and
-run the tests. A C17 compiler and GNU Make are required. Use
-=CC=clang= to select Clang instead of GCC (not recommended).
+Run =make= to build it and =make test= to build and run the tests. A
+C17 compiler and GNU Make are required. Use =CC=clang= to select
+Clang instead of GCC ([[https://gcc.gnu.org/legacy-ml/gcc/2014-01/msg00247.html][not recommended]]).
 
 On Windows, =nmake /f NMakefile= should be used to build with MSVC
-and =nmake /f NMakefile test= for the tests.
+and =nmake /f NMakefile test= for the tests. It builds =build\rnt.dll=
+along with its import library =build\rnt.lib=.
 
 * License
 

@@ -22,6 +22,14 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#if defined(_WIN32) && defined(RNT_BUILD)
+#define RNT_API __declspec(dllexport)
+#elif defined(__GNUC__) && !defined(_WIN32)
+#define RNT_API __attribute__((visibility("default")))
+#else
+#define RNT_API
+#endif
+
 /* Handles
 
    A handle is something the subsystem holds, and holding it is what
@@ -61,22 +69,22 @@ enum rnt_status {
    as long as the subsystem stays plugged. */
 typedef void (*rnt_stop_body)(void *data);
 
-enum rnt_status rnt_start(const char *name, rnt_stop_body stopping,
-                          void *data, rnt_handle **root);
+RNT_API enum rnt_status rnt_start(const char *name, rnt_stop_body stopping,
+                                  void *data, rnt_handle **root);
 
-enum rnt_status rnt_serve(void);
+RNT_API enum rnt_status rnt_serve(void);
 
-enum rnt_status rnt_poll(void);
+RNT_API enum rnt_status rnt_poll(void);
 
-void rnt_stop(void);
+RNT_API void rnt_stop(void);
 
-void rnt_release(rnt_handle *handle);
+RNT_API void rnt_release(rnt_handle *handle);
 
 /* Releases the handle when the variable leaves its scope. Only GNU C
    and Clang support this, so code that also builds elsewhere calls
    rnt_release itself. */
 #ifdef __GNUC__
-void rnt_release_scoped(rnt_handle **handle);
+RNT_API void rnt_release_scoped(rnt_handle **handle);
 #define rnt_scoped __attribute__((cleanup(rnt_release_scoped)))
 #endif
 
@@ -170,9 +178,10 @@ enum rnt_protocol {
   // There are many more, but these for now are fine.
 };
 
-enum rnt_status rnt_execute_protocol(const rnt_handle *handle,
-                                     enum rnt_protocol protocol, int operation,
-                                     const void *request, void *reply);
+RNT_API enum rnt_status rnt_execute_protocol(const rnt_handle *handle,
+                                             enum rnt_protocol protocol,
+                                             int operation,
+                                             const void *request, void *reply);
 
 /* Directory
 
@@ -283,9 +292,10 @@ typedef enum rnt_status (*rnt_evaluate_body)(const rnt_program *program,
                                              const rnt_handle *within,
                                              rnt_answer *answer, void *data);
 
-enum rnt_status rnt_offer(const char *language, rnt_evaluate_body body,
-                          void *data);
+RNT_API enum rnt_status rnt_offer(const char *language,
+                                  rnt_evaluate_body body, void *data);
 
-enum rnt_status rnt_answer_with(rnt_answer *answer, const rnt_entry *relation);
+RNT_API enum rnt_status rnt_answer_with(rnt_answer *answer,
+                                        const rnt_entry *relation);
 
 #endif

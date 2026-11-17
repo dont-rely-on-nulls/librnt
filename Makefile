@@ -1,49 +1,46 @@
 CC = gcc
-AR = ar
-
 CPPFLAGS += -Iinclude
 CFLAGS ?= -O2 -g
-CFLAGS += -std=c17 -Wall -Wextra -Wpedantic
-
+CFLAGS += -std=c17 -Wall -Wextra -Wpedantic -fPIC -fvisibility=hidden
 PREFIX ?= /usr/local
-DESTDIR ?=
-BUILD_DIR := build
-LIBRARY := $(BUILD_DIR)/librnt.a
-SOURCES := $(wildcard src/*.c)
-HEADERS := $(wildcard include/*.h)
-OBJECTS := $(patsubst src/%.c,$(BUILD_DIR)/%.o,$(SOURCES))
-DEPS := $(OBJECTS:.o=.d)
-TESTS := $(patsubst tests/%.c,$(BUILD_DIR)/tests/%,$(wildcard tests/*.c))
 
-.PHONY: all clean install test
-all: $(LIBRARY)
+OBJECTS := $(patsubst src/%.c,build/%.o,$(wildcard src/*.c))
+TESTS := $(patsubst tests/%.c,build/tests/%,$(wildcard tests/*.c))
 
-$(LIBRARY): $(OBJECTS) Makefile | $(BUILD_DIR)
-	$(AR) rcs $@ $(OBJECTS)
+ifeq ($(shell uname -s),Darwin)
+LIBRARY := librnt.dylib
+SHARED := -dynamiclib -install_name $(PREFIX)/lib/$(LIBRARY)
+else
+LIBRARY := librnt.so
+SHARED := -shared -Wl,-soname,$(LIBRARY)
+endif
 
-$(BUILD_DIR)/%.o: src/%.c Makefile | $(BUILD_DIR)
+.PHONY: all test install clean
+all: build/$(LIBRARY)
+
+build/$(LIBRARY): $(OBJECTS)
+	$(CC) $(SHARED) $(LDFLAGS) $^ -o $@
+
+build/%.o: src/%.c
+	@mkdir -p $(@D)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -MMD -MP -c $< -o $@
 
-$(BUILD_DIR) $(BUILD_DIR)/tests:
-	mkdir -p $@
+# Tests link the objects, so they obviously reach what the library
+# hides
+build/tests/%: tests/%.c $(OBJECTS)
+	@mkdir -p $(@D)
+	$(CC) $(CPPFLAGS) -Isrc $(CFLAGS) -MMD -MP $< $(OBJECTS) -o $@
 
-# Runs every test program, and fails if any of them does.
 test: $(TESTS)
-	@failed=0; for t in $(TESTS); do echo "$$t"; $$t || failed=1; done; exit $$failed
+	@for t in $^; do echo $$t; $$t || exit 1; done
 
-$(BUILD_DIR)/tests/%: tests/%.c tests/check.h $(HEADERS) $(LIBRARY) | $(BUILD_DIR)/tests
-	$(CC) $(CPPFLAGS) -Isrc $(CFLAGS) $< $(LIBRARY) -o $@
-
-install: $(LIBRARY)
-	install -d $(DESTDIR)$(PREFIX)/lib $(DESTDIR)$(PREFIX)/include
-	install -m 644 $(LIBRARY) $(DESTDIR)$(PREFIX)/lib/librnt.a
-	for header in $(HEADERS); do \
-		install -m 644 "$$header" $(DESTDIR)$(PREFIX)/include/; \
-	done
-	install -d $(DESTDIR)$(PREFIX)/share/licenses/librnt
-	install -m 644 LICENSE $(DESTDIR)$(PREFIX)/share/licenses/librnt/LICENSE
+install: all
+	install -d $(DESTDIR)$(PREFIX)/lib $(DESTDIR)$(PREFIX)/include $(DESTDIR)$(PREFIX)/share/licenses/librnt
+	install -m 755 build/$(LIBRARY) $(DESTDIR)$(PREFIX)/lib/
+	install -m 644 include/rnt.h $(DESTDIR)$(PREFIX)/include/
+	install -m 644 LICENSE $(DESTDIR)$(PREFIX)/share/licenses/librnt/
 
 clean:
-	$(RM) -r $(BUILD_DIR)
+	rm -rf build
 
--include $(DEPS)
+-include $(OBJECTS:.o=.d) $(TESTS:=.d)
