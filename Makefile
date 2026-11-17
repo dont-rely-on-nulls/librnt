@@ -15,7 +15,7 @@ LIBRARY := librnt.so
 SHARED := -shared -Wl,-soname,$(LIBRARY)
 endif
 
-.PHONY: all test install clean
+.PHONY: all test install clean fuzz
 all: build/$(LIBRARY)
 
 build/$(LIBRARY): $(OBJECTS)
@@ -34,10 +34,17 @@ build/tests/%: tests/%.c $(OBJECTS)
 test: $(TESTS)
 	@for t in $^; do echo $$t; $$t || exit 1; done
 
+# Fuzzes the kernel's decoder until it finds a crash, or is stopped.
+fuzz:
+	@mkdir -p build/fuzz/corpus
+	clang $(CPPFLAGS) -std=c17 -g -O1 -fsanitize=fuzzer,address,undefined \
+		$(wildcard src/*.c) tests/fuzz/decode.c -o build/fuzz/decode
+	build/fuzz/decode -max_len=65536 build/fuzz/corpus
+
 install: all
 	install -d $(DESTDIR)$(PREFIX)/lib $(DESTDIR)$(PREFIX)/include $(DESTDIR)$(PREFIX)/share/licenses/librnt
 	install -m 755 build/$(LIBRARY) $(DESTDIR)$(PREFIX)/lib/
-	install -m 644 include/rnt.h $(DESTDIR)$(PREFIX)/include/
+	install -m 644 include/rnt.h include/rnt_kernel.h $(DESTDIR)$(PREFIX)/include/
 	install -m 644 LICENSE $(DESTDIR)$(PREFIX)/share/licenses/librnt/
 
 clean:

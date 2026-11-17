@@ -12,10 +12,13 @@ CFLAGS = /nologo /std:c17 /W4 /O2 /Z7 /Iinclude /D_CRT_SECURE_NO_WARNINGS
 
 SHARED = build\rnt.dll
 IMPORT = build\rnt.lib
-OBJECTS = build\channel.obj build\lifecycle.obj build\protocol.obj \
-	build\session.obj build\wire.obj
-HEADERS = include\channel.h include\internal.h include\rnt.h include\wire.h
-TESTS = build\tests\start.exe
+OBJECTS = build\channel.obj build\kernel.obj build\lifecycle.obj \
+	build\plug.obj build\protocol.obj build\wire.obj
+HEADERS = include\channel.h include\internal.h include\rnt.h \
+	include\rnt_kernel.h include\wire.h
+TESTS = build\tests\wire.exe build\tests\kernel.exe build\tests\lifecycle.exe \
+	build\tests\channel.exe build\tests\protocol.exe build\tests\sessions.exe
+FUZZ_SECONDS = 60
 
 all: $(SHARED)
 
@@ -34,11 +37,20 @@ test: $(TESTS)
 
 # Tests link the objects themselves, so they reach what the DLL keeps
 # hidden, and run without searching for it.
-$(TESTS): tests\check.h $(HEADERS) $(OBJECTS)
+$(TESTS): tests\check.h tests\plugged.h $(HEADERS) $(OBJECTS)
 
 {tests}.c{build\tests}.exe:
 	@if not exist build\tests mkdir build\tests
 	$(CC) $(CFLAGS) /Isrc /Fobuild\tests\ /Fe$@ $< $(OBJECTS)
+
+# Fuzzes the kernel's decoder for FUZZ_SECONDS, or until it crashes.
+fuzz:
+	@if not exist build\fuzz\corpus mkdir build\fuzz\corpus
+	$(CC) /nologo /std:c17 /Zi /Iinclude /D_CRT_SECURE_NO_WARNINGS \
+		/fsanitize=address /fsanitize=fuzzer /Fobuild\fuzz\ \
+		/Febuild\fuzz\decode.exe src\*.c tests\fuzz\decode.c
+	build\fuzz\decode.exe -max_len=65536 -max_total_time=$(FUZZ_SECONDS) \
+		build\fuzz\corpus
 
 clean:
 	@if exist build rmdir /s /q build
