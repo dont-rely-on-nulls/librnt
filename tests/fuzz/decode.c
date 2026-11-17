@@ -1,3 +1,6 @@
+/* SPDX-License-Identifier: LGPL-3.0-or-later
+   Copyright 2026 Marcos Magueta <maguetamarcos@gmail.com> */
+
 /* A libFuzzer target over the kernel's decoder, which reads whatever a
    subsystem sends inside the kernel's own process. Whatever the bytes,
    decoding must give a status and leave nothing behind. */

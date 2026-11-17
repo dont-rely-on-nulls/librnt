@@ -1,3 +1,6 @@
+/* SPDX-License-Identifier: LGPL-3.0-or-later
+   Copyright 2026 Marcos Magueta <maguetamarcos@gmail.com> */
+
 #ifndef _WIN32
 #define _POSIX_C_SOURCE 200809L
 #endif

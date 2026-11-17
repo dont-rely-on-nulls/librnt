@@ -1,19 +1,7 @@
-/* rnt_kernel.h: the kernel's side of RNT's native protocol
-  Copyright 2026 Marcos Magueta <maguetamarcos@gmail.com>
-  This library is free software; you can redistribute it and/or
-  modify it under the terms of the GNU Lesser General Public
-  License as published by the Free Software Foundation; either
-  version 2.1 of the License, or (at your option) any later version.
+/* SPDX-License-Identifier: LGPL-3.0-or-later
+   Copyright 2026 Marcos Magueta <maguetamarcos@gmail.com> */
 
-  This library is distributed in the hope that it will be useful,
-  but WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-  Lesser General Public License for more details.
-
-  You should have received a copy of the GNU Lesser General Public
-  License along with this library; if not, write to the Free Software
-  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
-*/
+/* rnt_kernel.h: the kernel's side of RNT's native protocol */
 
 #ifndef RNT_KERNEL_H
 #define RNT_KERNEL_H

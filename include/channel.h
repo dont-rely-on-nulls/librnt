@@ -1,3 +1,6 @@
+/* SPDX-License-Identifier: LGPL-3.0-or-later
+   Copyright 2026 Marcos Magueta <maguetamarcos@gmail.com> */
+
 /* channel.h: the link between the kernel and a subsystem, and the only
    part of librnt that knows the operating system.
 

@@ -1,3 +1,6 @@
+/* SPDX-License-Identifier: LGPL-3.0-or-later
+   Copyright 2026 Marcos Magueta <maguetamarcos@gmail.com> */
+
 /* Spawns itself with "child" and a role: arguments checks it got the
    arguments below unchanged, environment that RNT_CHANNEL names its end,
    waiting starts and waits on the kernel, and leave exits at once. */

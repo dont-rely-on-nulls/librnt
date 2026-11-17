@@ -1,3 +1,6 @@
+/* SPDX-License-Identifier: LGPL-3.0-or-later
+   Copyright 2026 Marcos Magueta <maguetamarcos@gmail.com> */
+
 /* wire.h: the bytes librnt and the kernel exchange.
 
    A frame is a 4-byte length, then a kind, then the kind's fields in

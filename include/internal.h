@@ -1,3 +1,6 @@
+/* SPDX-License-Identifier: LGPL-3.0-or-later
+   Copyright 2026 Marcos Magueta <maguetamarcos@gmail.com> */
+
 /* internal.h: what librnt's sources share and its users never see. */
 
 #ifndef RNT_INTERNAL_H

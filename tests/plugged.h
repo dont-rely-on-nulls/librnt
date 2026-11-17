@@ -1,3 +1,6 @@
+/* SPDX-License-Identifier: LGPL-3.0-or-later
+   Copyright 2026 Marcos Magueta <maguetamarcos@gmail.com> */
+
 /* plugged.h: for a test program that plays both ends. Run plainly it is
    the kernel, and it spawns itself with "subsystem" as the subsystem,
    which offers lang, starts as test, finds y under its root, and

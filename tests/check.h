@@ -1,3 +1,6 @@
+/* SPDX-License-Identifier: LGPL-3.0-or-later
+   Copyright 2026 Marcos Magueta <maguetamarcos@gmail.com> */
+
 /* check.h: the least a test needs. Each file under tests/ is one
    program: its main runs its tests with RUN and returns RESULT. */
 
