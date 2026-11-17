@@ -1,182 +1,169 @@
+#include <string.h>
+
 #include "internal.h"
 
-/* Encoders write an operation's arguments from the request. */
-typedef void (*encoder)(rnt_buffer *buffer, const void *request);
+#define OPERATION(protocol, operation) ((protocol) << 8 | (operation))
 
-/* Decoders read the results of an operation into its reply. What ends
-   up not being read leaves the two ends disagreeing, and
-   disconnects. */
-typedef enum rnt_status (*decoder)(rnt_session *session, rnt_reader *results,
-                                   rnt_arena *arena, const void *request,
-                                   void *reply);
-
-static void no_arguments(rnt_buffer *buffer, const void *request) {
-  (void)buffer;
-  (void)request;
+static rnt_item handle_item(const rnt_session *session,
+                            const rnt_handle *handle) {
+  if (!handle)
+    return (rnt_item){RNT_ITEM_NOTHING};
+  // another session's handle is trash here, so the request fits nothing
+  if (handle->session != session)
+    return (rnt_item){0};
+  return (rnt_item){RNT_ITEM_HANDLE, {.handle = handle->number}};
 }
 
-static void name(rnt_buffer *buffer, const void *request) {
-  rnt_wire_string(buffer, request);
+// Only a missing entry is nothing. A NULL handle inside one would turn
+// a bind into an unbind.
+rnt_item rnt_item_of_entry(const rnt_session *session,
+                           const rnt_entry *entry) {
+  const rnt_object *object;
+
+  if (!entry)
+    return (rnt_item){RNT_ITEM_NOTHING};
+  if (entry->type == RNT_ENTRY_HANDLE && entry->as.handle)
+    return handle_item(session, entry->as.handle);
+  object = entry->type == RNT_ENTRY_OBJECT ? entry->as.object : NULL;
+  if (object && object->type == RNT_OBJECT_RELATION && object->as.relation)
+    return (rnt_item){RNT_ITEM_RELATION, {.relation = *object->as.relation}};
+  if (object && object->type == RNT_OBJECT_MULTIGROUP && object->as.multigroup)
+    return (rnt_item){RNT_ITEM_MULTIGROUP,
+                      {.multigroup = *object->as.multigroup}};
+  return (rnt_item){0};
 }
 
-static void registry_update(rnt_buffer *buffer, const void *request) {
-  const rnt_registry_update *update = request;
-  rnt_wire_string(buffer, update->name);
-  rnt_wire_handle(buffer, update->expected);
-  rnt_wire_entry(buffer, update->entry);
+static rnt_item string_item(const char *string) {
+  return (rnt_item){RNT_ITEM_STRING, {.string = string}};
 }
 
-static void associative_update(rnt_buffer *buffer, const void *request) {
-  const rnt_associative_update *update = request;
-  rnt_wire_string(buffer, update->name);
-  rnt_wire_entry(buffer, update->entry);
-}
-
-static void tuple(rnt_buffer *buffer, const void *request) {
-  rnt_wire_tuple(buffer, request);
-}
-
-/* Every input stands for an object, so a NULL one cannot be sent. */
-static void program(rnt_buffer *buffer, const void *request) {
-  const rnt_program *program = request;
-  rnt_wire_string(buffer, program->evaluator);
-  rnt_wire_string(buffer, program->source);
-  rnt_wire_list(buffer, program->arity);
-  for (size_t i = 0; i < program->arity; i++) {
-    if (!program->inputs[i] && !buffer->failure)
-      buffer->failure = RNT_STATUS_INVALID;
-    rnt_wire_handle(buffer, program->inputs[i]);
+/* Encoders write an operation's arguments from the request. A request
+   that is needed and missing, or a body that is, gives false. */
+static bool arguments(const rnt_session *session, int protocol, int operation,
+                      const void *request, rnt_arena *scratch, rnt_item *items,
+                      size_t *count) {
+  *count = 0;
+  if (!request)
+    return OPERATION(protocol, operation) ==
+           OPERATION(RNT_PROTOCOL_RELATION, RNT_RELATION_CURSOR);
+  switch (OPERATION(protocol, operation)) {
+  case OPERATION(RNT_PROTOCOL_RELATION, RNT_RELATION_CURSOR):
+    return true;
+  case OPERATION(RNT_PROTOCOL_DIRECTORY, RNT_DIRECTORY_LIST):
+    return ((const rnt_directory_list *)request)->body != NULL;
+  case OPERATION(RNT_PROTOCOL_RELATION, RNT_RELATION_HEADING):
+    return ((const rnt_relation_heading *)request)->body != NULL;
+  case OPERATION(RNT_PROTOCOL_DIRECTORY, RNT_DIRECTORY_FIND):
+    items[0] = string_item(request);
+    *count = 1;
+    return true;
+  case OPERATION(RNT_PROTOCOL_REGISTRY, RNT_REGISTRY_UPDATE): {
+    const rnt_registry_update *update = request;
+    items[0] = string_item(update->name);
+    items[1] = handle_item(session, update->expected);
+    items[2] = rnt_item_of_entry(session, update->entry);
+    *count = 3;
+    return true;
   }
-}
+  case OPERATION(RNT_PROTOCOL_ASSOCIATIVE, RNT_ASSOCIATIVE_UPDATE): {
+    const rnt_associative_update *update = request;
+    items[0] = string_item(update->name);
+    items[1] = rnt_item_of_entry(session, update->entry);
+    *count = 2;
+    return true;
+  }
+  case OPERATION(RNT_PROTOCOL_RELATION, RNT_RELATION_CONTAINS):
+    items[0] =
+        (rnt_item){RNT_ITEM_TUPLE, {.tuple = *(const rnt_tuple *)request}};
+    *count = 1;
+    return true;
+  case OPERATION(RNT_PROTOCOL_CURSOR, RNT_CURSOR_FETCH): {
+    const rnt_cursor_fetch *fetch = request;
+    // a limit past what the wire holds asks for the most it holds
+    int64_t limit =
+        fetch->limit > INT64_MAX ? INT64_MAX : (int64_t)fetch->limit;
+    items[0] = (rnt_item){RNT_ITEM_INTEGER, {.integer = limit}};
+    *count = 1;
+    return fetch->body != NULL;
+  }
+  case OPERATION(RNT_PROTOCOL_PROGRAM, RNT_PROGRAM_EVALUATE): {
+    const rnt_program *program = request;
+    rnt_item *inputs;
 
-/* A limit past what the wire holds asks for the most it holds. */
-static void limit(rnt_buffer *buffer, const void *request) {
-  const rnt_cursor_fetch *fetch = request;
-  rnt_wire_integer(buffer, fetch->limit > INT64_MAX ? INT64_MAX
-                                                    : (int64_t)fetch->limit);
-}
-
-/* Running out of memory while decoding leaves the frame read in full,
-   so the two ends still agree, and only says so. */
-static enum rnt_status whole(rnt_session *session, rnt_reader *results,
-                             const rnt_arena *arena, enum rnt_status status) {
-  if (arena->failed)
-    return RNT_STATUS_NO_MEMORY;
-  return rnt_read_done(results) ? status : rnt_session_disconnect(session);
-}
-
-static enum rnt_status no_results(rnt_session *session, rnt_reader *results,
-                                  rnt_arena *arena, const void *request,
-                                  void *reply) {
-  (void)request;
-  (void)reply;
-  return whole(session, results, arena, RNT_STATUS_OK);
+    if (program->arity && !program->inputs)
+      return false;
+    if (!(inputs = rnt_arena_allocate(scratch, program->arity, sizeof *inputs)))
+      return false;
+    // every input stands for an object, so a NULL one is trash
+    for (size_t i = 0; i < program->arity; i++)
+      inputs[i] = program->inputs[i] ? handle_item(session, program->inputs[i])
+                                     : (rnt_item){0};
+    items[0] = string_item(program->evaluator);
+    items[1] = string_item(program->source);
+    items[2] = (rnt_item){RNT_ITEM_LIST, {.list = {inputs, program->arity}}};
+    *count = 3;
+    return true;
+  }
+  }
+  return false;
 }
 
 /* A handle nobody can hold, since the reply is NULL or memory ran out,
    is dropped at once. */
-static enum rnt_status handle_of(rnt_session *session, rnt_reader *results,
-                                 rnt_arena *arena, const void *request,
+static enum rnt_status handle_of(rnt_session *session, const rnt_item *item,
                                  void *reply) {
-  uint64_t number = rnt_read_handle(results);
-  enum rnt_status status = whole(session, results, arena, RNT_STATUS_OK);
   rnt_handle **made = reply;
-  (void)request;
-  if (status != RNT_STATUS_OK)
-    return status;
-  if (made && (*made = rnt_handle_make(session, number)))
+
+  if (made && (*made = rnt_handle_make(session, item->as.handle)))
     return RNT_STATUS_OK;
-  rnt_session_drop(session, number);
+  if (rnt_session_open(session))
+    rnt_plug_drop(session, item->as.handle);
   return made ? RNT_STATUS_NO_MEMORY : RNT_STATUS_OK;
 }
 
-static enum rnt_status truth(rnt_session *session, rnt_reader *results,
-                             rnt_arena *arena, const void *request,
-                             void *reply) {
-  bool read = rnt_read_bool(results);
-  enum rnt_status status = whole(session, results, arena, RNT_STATUS_OK);
-  (void)request;
-  if (status == RNT_STATUS_OK && reply)
-    *(bool *)reply = read;
-  return status;
-}
-
-/* The body runs until it fails, and the rest is still read. What the
-   body is lent is freed once it returns. */
-static enum rnt_status names(rnt_session *session, rnt_reader *results,
-                             rnt_arena *arena, const void *request,
-                             void *reply) {
-  const rnt_directory_list *list = request;
-  size_t count = rnt_read_list(results);
+// A body runs until it fails, then the rest is thrown away.
+static enum rnt_status deliver(rnt_session *session, int protocol,
+                               int operation, const rnt_item *results,
+                               const void *request, void *reply) {
   enum rnt_status status = RNT_STATUS_OK;
-  (void)reply;
-  for (size_t i = 0; i < count; i++) {
-    const char *text = rnt_read_text(results, arena);
-    if (!text)
-      break;
-    if (status == RNT_STATUS_OK)
-      status = list->body(text, list->data);
-    rnt_arena_clear(arena);
-  }
-  return whole(session, results, arena, status);
-}
 
-static enum rnt_status tuples(rnt_session *session, rnt_reader *results,
-                              rnt_arena *arena, const void *request,
-                              void *reply) {
-  const rnt_cursor_fetch *fetch = request;
-  bool exhausted = rnt_read_bool(results);
-  size_t count = rnt_read_list(results);
-  enum rnt_status status = RNT_STATUS_OK;
-  for (size_t i = 0; i < count; i++) {
-    rnt_tuple read;
-    if (!rnt_read_tuple(results, arena, &read))
-      break;
-    if (status == RNT_STATUS_OK)
-      status = fetch->body(&read, fetch->data);
-    rnt_arena_clear(arena);
+  switch (OPERATION(protocol, operation)) {
+  case OPERATION(RNT_PROTOCOL_DIRECTORY, RNT_DIRECTORY_LIST): {
+    const rnt_directory_list *list = request;
+    const rnt_item *names = results[0].as.list.items;
+    for (size_t i = 0; status == RNT_STATUS_OK && i < results[0].as.list.count;
+         i++)
+      status = list->body(names[i].as.string, list->data);
+    return status;
   }
-  status = whole(session, results, arena, status);
-  if (status == RNT_STATUS_OK && reply)
-    *(bool *)reply = exhausted;
-  return status;
-}
-
-static enum rnt_status attributes(rnt_session *session, rnt_reader *results,
-                                  rnt_arena *arena, const void *request,
-                                  void *reply) {
-  const rnt_relation_heading *heading = request;
-  size_t count = rnt_read_list(results);
-  enum rnt_status status = RNT_STATUS_OK;
-  (void)reply;
-  for (size_t i = 0; i < count; i++) {
-    rnt_attribute read;
-    if (!rnt_read_attribute(results, arena, &read))
-      break;
-    if (status == RNT_STATUS_OK)
-      status = heading->body(&read, heading->data);
-    rnt_arena_clear(arena);
+  case OPERATION(RNT_PROTOCOL_RELATION, RNT_RELATION_HEADING): {
+    const rnt_relation_heading *heading = request;
+    const rnt_item *attributes = results[0].as.list.items;
+    for (size_t i = 0; status == RNT_STATUS_OK && i < results[0].as.list.count;
+         i++)
+      status = heading->body(&attributes[i].as.attribute, heading->data);
+    return status;
   }
-  return whole(session, results, arena, status);
+  case OPERATION(RNT_PROTOCOL_CURSOR, RNT_CURSOR_FETCH): {
+    const rnt_cursor_fetch *fetch = request;
+    const rnt_item *tuples = results[1].as.list.items;
+    for (size_t i = 0; status == RNT_STATUS_OK && i < results[1].as.list.count;
+         i++)
+      status = fetch->body(&tuples[i].as.tuple, fetch->data);
+    if (status == RNT_STATUS_OK && reply)
+      *(bool *)reply = results[0].as.truth;
+    return status;
+  }
+  case OPERATION(RNT_PROTOCOL_RELATION, RNT_RELATION_CONTAINS):
+    if (reply)
+      *(bool *)reply = results[0].as.truth;
+    return status;
+  case OPERATION(RNT_PROTOCOL_REGISTRY, RNT_REGISTRY_UPDATE):
+    return status;
+  default:
+    return handle_of(session, &results[0], reply);
+  }
 }
-
-static const struct {
-  enum rnt_protocol protocol;
-  int operation;
-  encoder encode;
-  decoder decode;
-} operations[] = {
-    {RNT_PROTOCOL_DIRECTORY, RNT_DIRECTORY_LIST, no_arguments, names},
-    {RNT_PROTOCOL_DIRECTORY, RNT_DIRECTORY_FIND, name, handle_of},
-    {RNT_PROTOCOL_REGISTRY, RNT_REGISTRY_UPDATE, registry_update, no_results},
-    {RNT_PROTOCOL_ASSOCIATIVE, RNT_ASSOCIATIVE_UPDATE, associative_update,
-     handle_of},
-    {RNT_PROTOCOL_RELATION, RNT_RELATION_CURSOR, no_arguments, handle_of},
-    {RNT_PROTOCOL_RELATION, RNT_RELATION_CONTAINS, tuple, truth},
-    {RNT_PROTOCOL_RELATION, RNT_RELATION_HEADING, no_arguments, attributes},
-    {RNT_PROTOCOL_CURSOR, RNT_CURSOR_FETCH, limit, tuples},
-    {RNT_PROTOCOL_PROGRAM, RNT_PROGRAM_EVALUATE, program, handle_of},
-};
 
 /* Whether the handle supports the protocol is the kernel's to say, so
    only an operation librnt does not know is unsupported here. A handle
@@ -184,34 +171,58 @@ static const struct {
 enum rnt_status rnt_execute_protocol(const rnt_handle *handle,
                                      enum rnt_protocol protocol, int operation,
                                      const void *request, void *reply) {
-  size_t count = sizeof operations / sizeof *operations, i = 0;
+  const rnt_operation *known = rnt_operation_of(protocol, operation);
+  rnt_arena scratch = rnt_arena_for(SIZE_MAX), arena = {0};
+  rnt_item items[RNT_ITEMS_MAX];
+  const rnt_item *results;
   rnt_buffer frame = {0}, answer = {0};
-  rnt_arena arena = {0};
-  rnt_reader results;
+  rnt_reader reader;
+  rnt_session *session;
   enum rnt_status status;
+  size_t count, start;
   uint64_t id;
-  size_t start;
-  while (i < count && (operations[i].protocol != protocol ||
-                       operations[i].operation != operation))
-    i++;
-  if (i == count)
+
+  if (!known)
     return RNT_STATUS_UNSUPPORTED;
-  if (reply && operations[i].decode == handle_of)
+  if (reply && strcmp(known->results, "h") == 0)
     *(rnt_handle **)reply = NULL;
   if (!handle)
-    return RNT_STATUS_UNSUPPORTED;
-  id = ++handle->session->last_id;
-  start = rnt_wire_frame(&frame, 'Q');
-  rnt_wire_u64(&frame, id);
-  rnt_wire_u64(&frame, handle->number);
-  rnt_wire_u8(&frame, (uint8_t)protocol);
-  rnt_wire_u8(&frame, (uint8_t)operation);
-  operations[i].encode(&frame, request);
-  rnt_wire_frame_end(&frame, start);
-  status = rnt_session_call(handle->session, &frame, id, &answer, &results);
-  if (status == RNT_STATUS_OK)
-    status =
-        operations[i].decode(handle->session, &results, &arena, request, reply);
+    return RNT_STATUS_INVALID;
+  session = handle->session;
+  if (!rnt_session_open(session))
+    return RNT_STATUS_DISCONNECTED;
+  if (!arguments(session, protocol, operation, request, &scratch, items,
+                 &count) ||
+      !rnt_items_fit(known->arguments, items, count))
+    status = scratch.failed ? RNT_STATUS_NO_MEMORY : RNT_STATUS_INVALID;
+  else {
+    id = ++session->plug->last_id;
+    start = rnt_wire_frame(&frame, 'Q');
+    rnt_wire_u64(&frame, id);
+    rnt_wire_u64(&frame, session->id);
+    rnt_wire_u64(&frame, handle->number);
+    rnt_wire_u8(&frame, (uint8_t)protocol);
+    rnt_wire_u8(&frame, (uint8_t)operation);
+    for (size_t i = 0; i < count; i++)
+      rnt_wire_item(&frame, &items[i]);
+    rnt_wire_frame_end(&frame, start);
+    rnt_session_hold(session);
+    status = rnt_plug_call(session->plug, &frame, id, &answer, &reader);
+    if (status == RNT_STATUS_OK) {
+      arena = rnt_arena_for(answer.length);
+      count = rnt_read_items(&reader, &arena, &results);
+      if (arena.failed)
+        status = RNT_STATUS_NO_MEMORY;
+      // results that don't fit the table are garbage, so we hang up
+      else if (!rnt_read_done(&reader) ||
+               !rnt_items_fit(known->results, results, count))
+        status = rnt_plug_disconnect(session->plug);
+      else
+        status = deliver(session, protocol, operation, results, request, reply);
+    }
+    rnt_session_let_go(session);
+  }
+  rnt_arena_free(&scratch);
   rnt_arena_free(&arena);
   rnt_buffer_free(&answer);
   rnt_buffer_free(&frame);
