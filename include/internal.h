@@ -9,13 +9,13 @@
 
 #include "wire.h"
 
-/* Sessions
+/* The plug
 
-   A session is the subsystem plugged into the kernel, one per
-   process, and every handle points to it. The kernel unplugs it by
-   asking, or the subsystem by stopping, and from then on its channel
-   is NULL and every call is disconnected. Its offers are the
-   evaluators it brings, told to the kernel when it asks. */
+   A process plugs into the kernel once, so there is one plug. It keeps
+   the channel, the evaluators offered and the sessions being served.
+   Once unplugged its channel is NULL and every call is disconnected. */
+typedef struct rnt_session rnt_session;
+
 typedef struct {
   char *language;
   rnt_evaluate_body body;
@@ -30,40 +30,57 @@ typedef struct {
   void *data;
   rnt_offering *offers;
   size_t offered;
-} rnt_session;
+  size_t depth;
+  rnt_session *sessions;
+  struct rnt_call *calls;
+} rnt_plug;
 
-/* The kernel numbers the handles it gives each subsystem, and a
-   handle is known on the wire by that number alone. */
+// Past this the C stack is in trouble, so we refuse instead.
+enum { RNT_DEPTH_MAX = 64 };
+
+/* Sessions
+
+   One per client of the kernel, made the first time the kernel names
+   it. Handles are numbered per session and die with it: a closed
+   session disconnects every call, and is freed with its last handle. */
+struct rnt_session {
+  rnt_plug *plug;
+  uint64_t id;
+  size_t held;
+  bool closed;
+  rnt_session *next;
+};
+
 struct rnt_handle {
   uint64_t number;
   rnt_session *session;
 };
 
+// NULL when out of memory.
+rnt_session *rnt_session_of(rnt_plug *plug, uint64_t id);
+void rnt_session_close(rnt_plug *plug, uint64_t id);
+void rnt_session_close_all(rnt_plug *plug);
+bool rnt_session_open(const rnt_session *session);
+void rnt_session_hold(rnt_session *session);
+void rnt_session_let_go(rnt_session *session);
+
 rnt_handle *rnt_handle_make(rnt_session *session, uint64_t number);
 
-/* Sends the request and waits for the frame answering its id, serving
-   whatever the kernel asks meanwhile. On a reply, the results are
-   left to be read from the answer. Asked to stop, it runs the
-   stopping body and then disconnects. */
-enum rnt_status rnt_session_call(rnt_session *session,
-                                 const rnt_buffer *request, uint64_t id,
-                                 rnt_buffer *answer, rnt_reader *results);
+// Of type 0 when the entry is trash, so it fits no schema.
+rnt_item rnt_item_of_entry(const rnt_session *session, const rnt_entry *entry);
 
-/* Serves what the kernel asks, the same way a call does while it
-   waits, until the kernel stops the session or is gone. */
-enum rnt_status rnt_session_serve(rnt_session *session);
+/* The turn
 
-/* Serves what the kernel has asked already, without waiting. */
-enum rnt_status rnt_session_poll(rnt_session *session);
-
-/* Closes the channel, and gives the status saying so. */
-enum rnt_status rnt_session_disconnect(rnt_session *session);
-
-/* Tells the kernel the subsystem no longer holds the handle it
-   numbered so. */
-void rnt_session_drop(rnt_session *session, uint64_t number);
-
-/* Tells the kernel the subsystem is unplugging, and disconnects. */
-void rnt_session_bye(rnt_session *session);
+   A call waits for its answer, serving whatever the kernel asks in the
+   meantime. Serving does that until stopped, polling only for what has
+   already arrived. */
+enum rnt_status rnt_plug_call(rnt_plug *plug, const rnt_buffer *request,
+                              uint64_t id, rnt_buffer *answer,
+                              rnt_reader *results);
+enum rnt_status rnt_plug_serve(rnt_plug *plug);
+enum rnt_status rnt_plug_poll(rnt_plug *plug);
+enum rnt_status rnt_plug_disconnect(rnt_plug *plug);
+void rnt_plug_drop(rnt_session *session, uint64_t number);
+void rnt_plug_bye(rnt_plug *plug);
 
 #endif
