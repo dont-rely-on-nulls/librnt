@@ -1,7 +1,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "internal.h"
 #include "wire.h"
 
 /* Writing */
@@ -108,6 +107,13 @@ static void count(rnt_buffer *buffer, size_t count) {
   rnt_wire_u32(buffer, (uint32_t)count);
 }
 
+// claims items but points nowhere: trash
+static bool present(rnt_buffer *buffer, const void *items, size_t count) {
+  if (count && !items)
+    fail(buffer, RNT_STATUS_INVALID);
+  return !buffer->failure;
+}
+
 void rnt_wire_nothing(rnt_buffer *buffer) { tag(buffer, 'n'); }
 
 void rnt_wire_bool(rnt_buffer *buffer, bool truth) {
@@ -121,20 +127,21 @@ void rnt_wire_integer(rnt_buffer *buffer, int64_t integer) {
 }
 
 void rnt_wire_string(rnt_buffer *buffer, const char *string) {
-  size_t length = strlen(string);
+  size_t length;
 
+  if (!string) {
+    fail(buffer, RNT_STATUS_INVALID);
+    return;
+  }
+  length = strlen(string);
   tag(buffer, 's');
   count(buffer, length);
   put(buffer, string, length);
 }
 
-void rnt_wire_handle(rnt_buffer *buffer, const rnt_handle *handle) {
-  if (!handle) {
-    rnt_wire_nothing(buffer);
-    return;
-  }
+void rnt_wire_number(rnt_buffer *buffer, uint64_t handle) {
   tag(buffer, 'h');
-  rnt_wire_u64(buffer, handle->number);
+  rnt_wire_u64(buffer, handle);
 }
 
 void rnt_wire_list(rnt_buffer *buffer, size_t length) {
@@ -167,40 +174,128 @@ void rnt_wire_tuple(rnt_buffer *buffer, const rnt_tuple *tuple) {
   tag(buffer, 't');
   rnt_wire_string(buffer, tuple->type);
   rnt_wire_list(buffer, tuple->degree);
-  for (size_t i = 0; i < tuple->degree; i++)
+  for (size_t i = 0;
+       present(buffer, tuple->fields, tuple->degree) && i < tuple->degree; i++)
     rnt_wire_field(buffer, &tuple->fields[i]);
 }
 
-void rnt_wire_relation(rnt_buffer *buffer, const rnt_relation *relation) {
-  tag(buffer, 'r');
-  rnt_wire_list(buffer, relation->degree);
-  for (size_t i = 0; i < relation->degree; i++)
-    rnt_wire_attribute(buffer, &relation->heading[i]);
-  rnt_wire_list(buffer, relation->cardinality);
-  for (size_t i = 0; i < relation->cardinality; i++)
-    rnt_wire_tuple(buffer, &relation->tuples[i]);
+static void tuples(rnt_buffer *buffer, const rnt_tuple *tuples, size_t count) {
+  rnt_wire_list(buffer, count);
+  for (size_t i = 0; present(buffer, tuples, count) && i < count; i++)
+    rnt_wire_tuple(buffer, &tuples[i]);
 }
 
-void rnt_wire_multigroup(rnt_buffer *buffer, const rnt_multigroup *multigroup) {
-  tag(buffer, 'm');
-  rnt_wire_list(buffer, multigroup->cardinality);
-  for (size_t i = 0; i < multigroup->cardinality; i++)
-    rnt_wire_tuple(buffer, &multigroup->tuples[i]);
-}
+void rnt_wire_item(rnt_buffer *buffer, const rnt_item *item) {
+  const rnt_relation *relation = &item->as.relation;
 
-void rnt_wire_entry(rnt_buffer *buffer, const rnt_entry *entry) {
-  if (!entry)
+  switch (item->type) {
+  case RNT_ITEM_NOTHING:
     rnt_wire_nothing(buffer);
-  else if (entry->type == RNT_ENTRY_HANDLE)
-    rnt_wire_handle(buffer, entry->as.handle);
-  else if (entry->type != RNT_ENTRY_OBJECT)
+    break;
+  case RNT_ITEM_BOOL:
+    rnt_wire_bool(buffer, item->as.truth);
+    break;
+  case RNT_ITEM_INTEGER:
+    rnt_wire_integer(buffer, item->as.integer);
+    break;
+  case RNT_ITEM_STRING:
+    rnt_wire_string(buffer, item->as.string);
+    break;
+  case RNT_ITEM_HANDLE:
+    rnt_wire_number(buffer, item->as.handle);
+    break;
+  case RNT_ITEM_ATTRIBUTE:
+    rnt_wire_attribute(buffer, &item->as.attribute);
+    break;
+  case RNT_ITEM_FIELD:
+    rnt_wire_field(buffer, &item->as.field);
+    break;
+  case RNT_ITEM_TUPLE:
+    rnt_wire_tuple(buffer, &item->as.tuple);
+    break;
+  case RNT_ITEM_RELATION:
+    tag(buffer, 'r');
+    rnt_wire_list(buffer, relation->degree);
+    for (size_t i = 0; present(buffer, relation->heading, relation->degree) &&
+                       i < relation->degree;
+         i++)
+      rnt_wire_attribute(buffer, &relation->heading[i]);
+    tuples(buffer, relation->tuples, relation->cardinality);
+    break;
+  case RNT_ITEM_MULTIGROUP:
+    tag(buffer, 'm');
+    tuples(buffer, item->as.multigroup.tuples, item->as.multigroup.cardinality);
+    break;
+  case RNT_ITEM_LIST:
+    rnt_wire_list(buffer, item->as.list.count);
+    for (size_t i = 0;
+         present(buffer, item->as.list.items, item->as.list.count) &&
+         i < item->as.list.count;
+         i++) {
+      if (item->as.list.items[i].type == RNT_ITEM_LIST)
+        fail(buffer, RNT_STATUS_INVALID);
+      rnt_wire_item(buffer, &item->as.list.items[i]);
+    }
+    break;
+  default:
     fail(buffer, RNT_STATUS_INVALID);
-  else if (entry->as.object->type == RNT_OBJECT_RELATION)
-    rnt_wire_relation(buffer, entry->as.object->as.relation);
-  else if (entry->as.object->type == RNT_OBJECT_MULTIGROUP)
-    rnt_wire_multigroup(buffer, entry->as.object->as.multigroup);
-  else
-    fail(buffer, RNT_STATUS_INVALID);
+  }
+}
+
+/* Operations */
+
+static const rnt_operation operations[] = {
+    {RNT_PROTOCOL_DIRECTORY, RNT_DIRECTORY_LIST, "", "S"},
+    {RNT_PROTOCOL_DIRECTORY, RNT_DIRECTORY_FIND, "s", "h"},
+    {RNT_PROTOCOL_REGISTRY, RNT_REGISTRY_UPDATE, "soe", ""},
+    {RNT_PROTOCOL_ASSOCIATIVE, RNT_ASSOCIATIVE_UPDATE, "se", "h"},
+    {RNT_PROTOCOL_RELATION, RNT_RELATION_CURSOR, "", "h"},
+    {RNT_PROTOCOL_RELATION, RNT_RELATION_CONTAINS, "t", "b"},
+    {RNT_PROTOCOL_RELATION, RNT_RELATION_HEADING, "", "A"},
+    {RNT_PROTOCOL_CURSOR, RNT_CURSOR_FETCH, "i", "bT"},
+    {RNT_PROTOCOL_PROGRAM, RNT_PROGRAM_EVALUATE, "ssH", "h"},
+};
+
+const rnt_operation *rnt_operation_of(int protocol, int operation) {
+  for (size_t i = 0; i < sizeof operations / sizeof *operations; i++)
+    if (operations[i].protocol == protocol &&
+        operations[i].operation == operation)
+      return &operations[i];
+  return NULL;
+}
+
+static bool fits(char letter, const rnt_item *item) {
+  switch (letter) {
+  case 'o':
+    return item->type == RNT_ITEM_NOTHING || item->type == RNT_ITEM_HANDLE;
+  case 'e':
+    return item->type == RNT_ITEM_NOTHING || item->type == RNT_ITEM_HANDLE ||
+           item->type == RNT_ITEM_RELATION ||
+           item->type == RNT_ITEM_MULTIGROUP;
+  case 'S':
+  case 'H':
+  case 'A':
+  case 'T':
+  case 'F':
+    if (item->type != RNT_ITEM_LIST)
+      return false;
+    // S, H, A, T and F are lists of s, h, a, t and f
+    for (size_t i = 0; i < item->as.list.count; i++)
+      if (item->as.list.items[i].type != letter - 'A' + 'a')
+        return false;
+    return true;
+  default:
+    return item->type == (enum rnt_item_type)letter;
+  }
+}
+
+bool rnt_items_fit(const char *schema, const rnt_item *items, size_t count) {
+  size_t i = 0;
+
+  for (; schema[i]; i++)
+    if (i >= count || !fits(schema[i], &items[i]))
+      return false;
+  return i == count;
 }
 
 /* Reading */
@@ -219,10 +314,14 @@ rnt_reader rnt_reader_of(const void *bytes, size_t length) {
   return reader;
 }
 
+static size_t left(const rnt_reader *reader) {
+  return (size_t)(reader->end - reader->at);
+}
+
 static const unsigned char *take(rnt_reader *reader, size_t length) {
   const unsigned char *at = reader->at;
 
-  if (reader->failed || (size_t)(reader->end - at) < length) {
+  if (reader->failed || left(reader) < length) {
     reader->failed = true;
     return NULL;
   }
@@ -300,8 +399,12 @@ uint64_t rnt_read_handle(rnt_reader *reader) {
   return expect(reader, 'h') ? rnt_read_u64(reader) : 0;
 }
 
-size_t rnt_read_list(rnt_reader *reader) {
-  return expect(reader, 'l') ? rnt_read_u32(reader) : 0;
+size_t rnt_read_list(rnt_reader *reader, size_t smallest) {
+  size_t count = expect(reader, 'l') ? rnt_read_u32(reader) : 0;
+
+  if (smallest && count > left(reader) / smallest)
+    reader->failed = true;
+  return reader->failed ? 0 : count;
 }
 
 bool rnt_read_done(const rnt_reader *reader) {
@@ -310,44 +413,88 @@ bool rnt_read_done(const rnt_reader *reader) {
 
 /* Decoding */
 
-void *rnt_arena_allocate(rnt_arena *arena, size_t size) {
-  void *block = NULL;
+// The worst a frame can do is a list of empty strings, which decodes to
+// about eleven times its size. Twelve times the frame is plenty, and
+// anything asking for more is garbage.
+typedef union {
+  long double number;
+  long long integer;
+  void *pointer;
+  void (*function)(void);
+} aligned;
 
-  if (arena->count == arena->capacity) {
-    size_t capacity = arena->capacity ? arena->capacity * 2 : 16;
-    void **grown = realloc(arena->blocks, capacity * sizeof *grown);
+struct rnt_chunk {
+  rnt_chunk *next;
+  aligned bytes[];
+};
 
-    if (grown) {
-      arena->blocks = grown;
-      arena->capacity = capacity;
-    }
+enum { CHUNK = 4096, ALIGN = sizeof(aligned), SLACK = 256 };
+
+rnt_arena rnt_arena_for(size_t length) {
+  rnt_arena arena = {0};
+
+  arena.budget =
+      length > (SIZE_MAX - SLACK) / 12 ? SIZE_MAX : length * 12 + SLACK;
+  return arena;
+}
+
+static void *refused(rnt_arena *arena) {
+  arena->failed = true;
+  return NULL;
+}
+
+void *rnt_arena_allocate(rnt_arena *arena, size_t count, size_t size) {
+  size_t bytes;
+  void *at;
+
+  if (arena->failed || (size && count > SIZE_MAX / size))
+    return refused(arena);
+  bytes = count * size;
+  if (bytes > SIZE_MAX - ALIGN)
+    return refused(arena);
+  bytes = bytes ? (bytes + ALIGN - 1) / ALIGN * ALIGN : ALIGN;
+  if (bytes > arena->budget - arena->spent)
+    return refused(arena);
+  if (!arena->chunks || bytes > arena->room - arena->used) {
+    size_t room = bytes > CHUNK ? bytes : CHUNK;
+    rnt_chunk *chunk = malloc(sizeof *chunk + room);
+
+    if (!chunk)
+      return refused(arena);
+    chunk->next = arena->chunks;
+    arena->chunks = chunk;
+    arena->room = room;
+    arena->used = 0;
   }
-  if (arena->count < arena->capacity)
-    block = malloc(size ? size : 1);
-  if (block)
-    arena->blocks[arena->count++] = block;
-  else
-    arena->failed = true;
-  return block;
+  at = (unsigned char *)arena->chunks->bytes + arena->used;
+  arena->used += bytes;
+  arena->spent += bytes;
+  return at;
 }
 
 void rnt_arena_clear(rnt_arena *arena) {
-  for (size_t i = 0; i < arena->count; i++)
-    free(arena->blocks[i]);
-  arena->count = 0;
+  while (arena->chunks) {
+    rnt_chunk *next = arena->chunks->next;
+
+    free(arena->chunks);
+    arena->chunks = next;
+  }
+  arena->used = arena->room = arena->spent = 0;
 }
 
 void rnt_arena_free(rnt_arena *arena) {
   rnt_arena_clear(arena);
-  free(arena->blocks);
   *arena = (rnt_arena){0};
 }
 
 const char *rnt_read_text(rnt_reader *reader, rnt_arena *arena) {
   rnt_slice slice = rnt_read_string(reader);
-  char *text =
-      reader->failed ? NULL : rnt_arena_allocate(arena, slice.length + 1);
+  char *text = NULL;
 
+  if (!reader->failed && slice.length && memchr(slice.bytes, 0, slice.length))
+    reader->failed = true;
+  if (!reader->failed)
+    text = rnt_arena_allocate(arena, slice.length + 1, 1);
   if (!text) {
     reader->failed = true;
     return NULL;
@@ -369,30 +516,30 @@ bool rnt_read_value(rnt_reader *reader, rnt_arena *arena, rnt_value *value) {
   return !reader->failed;
 }
 
-/* A count larger than what is left to read is refused before anything
-   is allocated for it, since every field takes at least a byte. */
+static void *room(rnt_reader *reader, rnt_arena *arena, size_t count,
+                  size_t size) {
+  void *at = reader->failed ? NULL : rnt_arena_allocate(arena, count, size);
+  if (!at)
+    reader->failed = true;
+  return at;
+}
+
+static void read_field(rnt_reader *reader, rnt_arena *arena,
+                       rnt_field *field) {
+  expect(reader, 'f');
+  field->name = rnt_read_text(reader, arena);
+  rnt_read_value(reader, arena, &field->value);
+}
+
 bool rnt_read_tuple(rnt_reader *reader, rnt_arena *arena, rnt_tuple *tuple) {
-  rnt_field *fields = NULL;
-  size_t degree;
+  rnt_field *fields;
 
   expect(reader, 't');
   tuple->type = rnt_read_text(reader, arena);
-  degree = rnt_read_list(reader);
-  if (degree > (size_t)(reader->end - reader->at))
-    reader->failed = true;
-  if (!reader->failed)
-    fields = rnt_arena_allocate(arena, degree * sizeof *fields);
-  if (!fields) {
-    reader->failed = true;
-    return false;
-  }
-  for (size_t i = 0; i < degree && !reader->failed; i++) {
-    expect(reader, 'f');
-    fields[i].name = rnt_read_text(reader, arena);
-    rnt_read_value(reader, arena, &fields[i].value);
-  }
-  tuple->fields = fields;
-  tuple->degree = degree;
+  tuple->degree = rnt_read_list(reader, RNT_WIRE_FIELD);
+  tuple->fields = fields = room(reader, arena, tuple->degree, sizeof *fields);
+  for (size_t i = 0; fields && i < tuple->degree && !reader->failed; i++)
+    read_field(reader, arena, &fields[i]);
   return !reader->failed;
 }
 
@@ -402,4 +549,95 @@ bool rnt_read_attribute(rnt_reader *reader, rnt_arena *arena,
   attribute->name = rnt_read_text(reader, arena);
   attribute->domain = rnt_read_text(reader, arena);
   return !reader->failed;
+}
+
+static const rnt_tuple *tuples_of(rnt_reader *reader, rnt_arena *arena,
+                                  size_t *count) {
+  rnt_tuple *read;
+
+  *count = rnt_read_list(reader, RNT_WIRE_TUPLE);
+  read = room(reader, arena, *count, sizeof *read);
+  for (size_t i = 0; read && i < *count && !reader->failed; i++)
+    rnt_read_tuple(reader, arena, &read[i]);
+  return read;
+}
+
+// Lists of lists are garbage, so this never nests deeper than one.
+static void read_item(rnt_reader *reader, rnt_arena *arena, rnt_item *item,
+                      bool nested) {
+  rnt_attribute *heading;
+  rnt_item *items;
+
+  *item = (rnt_item){.type = (enum rnt_item_type)rnt_read_tag(reader)};
+  switch (item->type) {
+  case RNT_ITEM_NOTHING:
+    rnt_read_nothing(reader);
+    break;
+  case RNT_ITEM_BOOL:
+    item->as.truth = rnt_read_bool(reader);
+    break;
+  case RNT_ITEM_INTEGER:
+    item->as.integer = rnt_read_integer(reader);
+    break;
+  case RNT_ITEM_STRING:
+    item->as.string = rnt_read_text(reader, arena);
+    break;
+  case RNT_ITEM_HANDLE:
+    item->as.handle = rnt_read_handle(reader);
+    break;
+  case RNT_ITEM_ATTRIBUTE:
+    rnt_read_attribute(reader, arena, &item->as.attribute);
+    break;
+  case RNT_ITEM_FIELD:
+    read_field(reader, arena, &item->as.field);
+    break;
+  case RNT_ITEM_TUPLE:
+    rnt_read_tuple(reader, arena, &item->as.tuple);
+    break;
+  case RNT_ITEM_RELATION:
+    expect(reader, 'r');
+    item->as.relation.degree = rnt_read_list(reader, RNT_WIRE_ATTRIBUTE);
+    item->as.relation.heading = heading =
+        room(reader, arena, item->as.relation.degree, sizeof *heading);
+    for (size_t i = 0; heading && i < item->as.relation.degree; i++)
+      rnt_read_attribute(reader, arena, &heading[i]);
+    item->as.relation.tuples =
+        tuples_of(reader, arena, &item->as.relation.cardinality);
+    break;
+  case RNT_ITEM_MULTIGROUP:
+    expect(reader, 'm');
+    item->as.multigroup.tuples =
+        tuples_of(reader, arena, &item->as.multigroup.cardinality);
+    break;
+  case RNT_ITEM_LIST:
+    if (nested) {
+      reader->failed = true;
+      break;
+    }
+    item->as.list.count = rnt_read_list(reader, RNT_WIRE_STRING);
+    item->as.list.items = items =
+        room(reader, arena, item->as.list.count, sizeof *items);
+    for (size_t i = 0; items && i < item->as.list.count && !reader->failed;
+         i++)
+      read_item(reader, arena, &items[i], true);
+    break;
+  default:
+    reader->failed = true;
+  }
+}
+
+size_t rnt_read_items(rnt_reader *reader, rnt_arena *arena,
+                      const rnt_item **items) {
+  rnt_item *read = room(reader, arena, RNT_ITEMS_MAX, sizeof *read);
+  size_t count = 0;
+
+  for (; read && !reader->failed && reader->at < reader->end; count++) {
+    if (count == RNT_ITEMS_MAX) {
+      reader->failed = true;
+      break;
+    }
+    read_item(reader, arena, &read[count], false);
+  }
+  *items = read;
+  return count;
 }
