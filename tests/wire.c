@@ -122,6 +122,17 @@ static void failure_sticks(void) {
   rnt_buffer_free(&buffer);
 }
 
+/* Extending a fresh buffer by nothing gives a pointer, not a failure. */
+static void empty_extend_of_a_fresh_buffer(void) {
+  rnt_buffer buffer = {0};
+
+  CHECK(rnt_buffer_extend(&buffer, 0) != NULL);
+  CHECK(buffer.failure == 0 && buffer.length == 0);
+  CHECK(rnt_buffer_extend(&buffer, 0) != NULL && buffer.length == 0);
+  CHECK(rnt_buffer_extend(&buffer, 3) != NULL && buffer.length == 3);
+  rnt_buffer_free(&buffer);
+}
+
 static void malformed_items_fail_the_buffer(void) {
   rnt_tuple fieldless = {"t", NULL, 1};
   rnt_value unknown = {0};
@@ -234,6 +245,7 @@ int main(void) {
   RUN(lists_are_bounded);
   RUN(text_is_copied_and_checked);
   RUN(failure_sticks);
+  RUN(empty_extend_of_a_fresh_buffer);
   RUN(malformed_items_fail_the_buffer);
   RUN(items_read_back);
   RUN(schemas_and_operations);

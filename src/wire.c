@@ -29,7 +29,9 @@ unsigned char *rnt_buffer_extend(rnt_buffer *buffer, size_t length) {
     fail(buffer, RNT_STATUS_NO_MEMORY);
   if (buffer->failure)
     return NULL;
-  if (needed > buffer->capacity) {
+  // A buffer that was never allocated has no bytes to point into, even
+  // for a zero-length extend, so it gets its first block here too.
+  if (needed > buffer->capacity || !buffer->bytes) {
     size_t capacity = buffer->capacity ? buffer->capacity : 64;
     unsigned char *grown;
 
