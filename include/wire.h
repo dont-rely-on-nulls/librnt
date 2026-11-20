@@ -1,25 +1,8 @@
 /* SPDX-License-Identifier: LGPL-3.0-or-later
    Copyright 2026 Marcos Magueta <maguetamarcos@gmail.com> */
 
-/* wire.h: the bytes librnt and the kernel exchange.
-
-   A frame is a 4-byte length, then a kind, then the kind's fields in
-   order. Fields are raw integers or items, and an item is a tag byte
-   and its payload. Integers are big-endian and of fixed width, and
-   whatever varies in size carries its length or count first. Neither
-   end accepts a frame longer than RNT_FRAME_MAX.
-
-   Handle numbers mean something only in the session a frame names.
-
-     H  hello    subsystem  id, version, name
-     R  reply    either     id, results; to a hello: version, session, root
-     E  error    either     id, name, message, fields
-     Q  request  subsystem  id, session, handle, protocol, operation, ...
-     Q  ask      kernel     id, operation, ...; evaluate: session first
-     D  drop     subsystem  session, handle
-     C  close    kernel     session
-     S  stop     kernel
-     B  bye      subsystem */
+/* A frame starts with a four-byte big-endian body length and a one-byte kind.
+   Items carry a tag. Strings and lists carry a four-byte length or count. */
 
 #ifndef RNT_WIRE_H
 #define RNT_WIRE_H
@@ -30,12 +13,11 @@
 
 #include "rnt_kernel.h"
 
-enum { RNT_WIRE_VERSION = 3, RNT_FRAME_MAX = 64 * 1024 * 1024 };
+enum { RNT_WIRE_VERSION = 5, RNT_FRAME_MAX = 64 * 1024 * 1024 };
 
 enum { RNT_ASK_OFFERS = 1, RNT_ASK_EVALUATE };
 
-// The smallest each item can be, so a count can't lie about how many
-// follow.
+/* Minimum encoded sizes let the reader check a count before allocating. */
 enum {
   RNT_WIRE_HANDLE = 9,
   RNT_WIRE_STRING = 5,
@@ -44,31 +26,58 @@ enum {
   RNT_WIRE_TUPLE = 11
 };
 
-/* Operations
+/* A form describes which items fit one position in a signature. */
+typedef enum {
+  FORM_END,
+  FORM_STRING,
+  FORM_BOOL,
+  FORM_TUPLE,
+  FORM_ATTRIBUTE,
+  FORM_FIELD,
+  FORM_HANDLE,
+  FORM_OPTIONAL_HANDLE,
+  FORM_OBJECT,
+  FORM_BINDING,
+  FORM_LIMIT,
+  FORM_VALUE,
+  FORM_STRINGS,
+  FORM_HANDLES,
+  FORM_TUPLES,
+  FORM_FIELDS,
+  FORM_HASH,
+  FORM_OPTIONAL_HASH,
+  FORM_DESCRIPTION,
+  FORM_ATTRIBUTES,
+  FORM_ATTRIBUTE_DESCRIPTION,
+  FORM_ORIGINS,
+  FORM_ORIGIN,
+  FORM_PAIRS,
+  FORM_PAIR,
+  FORM_MODES,
+  FORM_MODE,
+  FORM_CARDINALITY,
+  FORM_VIOLATIONS,
+  FORM_VIOLATION
+} rnt_form;
 
-   What each operation sends and gets back, one letter per item: s
-   string, h handle, i integer, b bool, t tuple, o handle or nothing, e
-   an entry (nothing, handle, relation or multigroup), and S, H, A, T, F
-   for lists of strings, handles, attributes, tuples and fields. Both
-   ends read the same table, so an operation is described once. */
+#define FORMS(...)                                                             \
+  (const rnt_form[]) { __VA_ARGS__, FORM_END }
+
+extern const rnt_form rnt_no_items[], rnt_error_items[], rnt_evaluation_items[];
+
 typedef struct {
-  int protocol;
-  int operation;
-  const char *arguments;
-  const char *results;
-} rnt_operation;
+  enum rnt_protocol protocol;
+  enum rnt_method method;
+  const rnt_form *arguments;
+  const rnt_form *results;
+} rnt_signature;
 
-// NULL when we don't know it.
-const rnt_operation *rnt_operation_of(int protocol, int operation);
-bool rnt_items_fit(const char *schema, const rnt_item *items, size_t count);
+const rnt_signature *rnt_signature_of(int protocol, int method);
+bool rnt_items_fit(const rnt_form *forms, const rnt_item *items, size_t count);
 
-enum { RNT_ITEMS_MAX = 4 };
+enum { RNT_LIST_DEPTH_MAX = 8 };
 
-/* Writing
-
-   A buffer grows as it is written to, and starts out zeroed. Once it
-   fails, its failure says why, invalid or out of memory, and every
-   later write does nothing, so a writer checks once, at the end. */
+/* Zero-initialize a buffer. The first failed write sets failure for all later writes. */
 typedef struct {
   unsigned char *bytes;
   size_t length;
@@ -78,8 +87,6 @@ typedef struct {
 
 void rnt_buffer_free(rnt_buffer *buffer);
 
-/* Grows the buffer by length bytes, giving where they start, or NULL
-   once it is failed. */
 unsigned char *rnt_buffer_extend(rnt_buffer *buffer, size_t length);
 
 void rnt_wire_u8(rnt_buffer *buffer, uint8_t number);
@@ -87,16 +94,10 @@ void rnt_wire_u16(rnt_buffer *buffer, uint16_t number);
 void rnt_wire_u32(rnt_buffer *buffer, uint32_t number);
 void rnt_wire_u64(rnt_buffer *buffer, uint64_t number);
 
-/* Starts a frame of the kind, giving where it starts for its end to
-   write its length. */
+/* Keep the offset so frame_end can fill in the body length after encoding. */
 size_t rnt_wire_frame(rnt_buffer *buffer, char kind);
 void rnt_wire_frame_end(rnt_buffer *buffer, size_t start);
 
-/* Items. A list is only its count, and the caller writes its items
-   after it, unless it is a list item, which carries them. A value or
-   item of no known type fails the buffer as invalid, and so does any
-   other garbage: NULL strings, lists of lists, arrays that claim items
-   and point nowhere. */
 void rnt_wire_nothing(rnt_buffer *buffer);
 void rnt_wire_bool(rnt_buffer *buffer, bool truth);
 void rnt_wire_integer(rnt_buffer *buffer, int64_t integer);
@@ -109,12 +110,7 @@ void rnt_wire_field(rnt_buffer *buffer, const rnt_field *field);
 void rnt_wire_tuple(rnt_buffer *buffer, const rnt_tuple *tuple);
 void rnt_wire_item(rnt_buffer *buffer, const rnt_item *item);
 
-/* Reading
-
-   A reader walks bytes it does not own. Reading anything but what is
-   there fails it: it gives zeroes from then on, so a reader checks
-   once, at the end. A string read is a view into those bytes, and is
-   not terminated. */
+/* A reader borrows the frame. Check rnt_read_done after the last field. */
 typedef struct {
   const unsigned char *at;
   const unsigned char *end;
@@ -122,7 +118,7 @@ typedef struct {
 } rnt_reader;
 
 typedef struct {
-  const char *bytes;
+  const char *bytes; /* A slice borrows bytes from the frame. Use length for strings. */
   size_t length;
 } rnt_slice;
 
@@ -135,7 +131,7 @@ uint16_t rnt_read_u16(rnt_reader *reader);
 uint32_t rnt_read_u32(rnt_reader *reader);
 uint64_t rnt_read_u64(rnt_reader *reader);
 
-/* The tag of the next item, without reading it, or 0 at the end. */
+/* Peeks at the next tag. Zero marks the end or a failed read. */
 char rnt_read_tag(const rnt_reader *reader);
 
 void rnt_read_nothing(rnt_reader *reader);
@@ -144,21 +140,11 @@ int64_t rnt_read_integer(rnt_reader *reader);
 rnt_slice rnt_read_string(rnt_reader *reader);
 uint64_t rnt_read_handle(rnt_reader *reader);
 
-// Refused when what is left can't possibly hold that many.
 size_t rnt_read_list(rnt_reader *reader, size_t smallest);
 
-/* Whether everything was read, and nothing failed. */
 bool rnt_read_done(const rnt_reader *reader);
 
-/* Decoding
-
-   What is decoded into librnt's own types is copied into an arena,
-   since those types want terminated strings. Everything in an arena
-   is freed together, by clearing it once what was decoded is no
-   longer lent out. Running out of memory fails both the arena and
-   the reader, and the arena stays failed through clearing. The arena
-   only hands out so much for a frame of its length, so a frame can't
-   make us hold much more than itself. */
+/* Decoded items share one arena. The frame length bounds its allocation budget. */
 typedef struct rnt_chunk rnt_chunk;
 
 typedef struct {
@@ -175,7 +161,6 @@ void *rnt_arena_allocate(rnt_arena *arena, size_t count, size_t size);
 void rnt_arena_clear(rnt_arena *arena);
 void rnt_arena_free(rnt_arena *arena);
 
-// A NUL in the middle is garbage: everyone would read it shorter.
 const char *rnt_read_text(rnt_reader *reader, rnt_arena *arena);
 bool rnt_read_value(rnt_reader *reader, rnt_arena *arena, rnt_value *value);
 bool rnt_read_tuple(rnt_reader *reader, rnt_arena *arena, rnt_tuple *tuple);

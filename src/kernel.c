@@ -23,8 +23,6 @@ bool rnt_kernel_ready(rnt_link *link, int milliseconds) {
   return rnt_channel_pending(link, milliseconds);
 }
 
-/* Decoding */
-
 void rnt_kernel_message_free(rnt_message *message) {
   if (message->memory)
     rnt_arena_free(message->memory);
@@ -32,11 +30,13 @@ void rnt_kernel_message_free(rnt_message *message) {
   *message = (rnt_message){0};
 }
 
-// The schema a kind's items must fit, NULL for an operation we don't
-// know, whose items get read and left alone.
-static const char *fields(rnt_reader *reader, rnt_message *message,
-                          enum rnt_status *status) {
-  const rnt_operation *operation;
+static const rnt_form hello_items[] = {FORM_STRING, FORM_END};
+static const rnt_form offers_items[] = {FORM_STRINGS, FORM_END};
+static const rnt_form answer_items[] = {FORM_OBJECT, FORM_END};
+
+static const rnt_form *read_header(rnt_reader *reader, rnt_message *message,
+                                   enum rnt_status *status) {
+  const rnt_signature *signature;
 
   switch ((char)rnt_read_u8(reader)) {
   case 'H':
@@ -44,51 +44,58 @@ static const char *fields(rnt_reader *reader, rnt_message *message,
     message->id = rnt_read_u64(reader);
     if (rnt_read_u16(reader) != RNT_WIRE_VERSION)
       *status = RNT_STATUS_UNSUPPORTED;
-    return "s";
+    return hello_items;
   case 'Q':
     message->kind = RNT_MESSAGE_REQUEST;
     message->id = rnt_read_u64(reader);
     message->session = rnt_read_u64(reader);
     message->handle = rnt_read_u64(reader);
     message->protocol = rnt_read_u8(reader);
-    message->operation = rnt_read_u8(reader);
-    operation = rnt_operation_of(message->protocol, message->operation);
-    message->known = operation != NULL;
-    return operation ? operation->arguments : NULL;
+    message->method = rnt_read_u8(reader);
+    signature = rnt_signature_of(message->protocol, message->method);
+    message->known = signature != NULL;
+    return signature ? signature->arguments : NULL;
   case 'D':
     message->kind = RNT_MESSAGE_DROP;
     message->session = rnt_read_u64(reader);
     message->handle = rnt_read_u64(reader);
-    return "";
+    return rnt_no_items;
   case 'B':
     message->kind = RNT_MESSAGE_BYE;
-    return "";
+    return rnt_no_items;
   case 'R':
     message->kind = RNT_MESSAGE_REPLY;
     message->id = rnt_read_u64(reader);
-    return rnt_read_tag(reader) == RNT_ITEM_LIST ? "S" : "e";
+    /* An offers reply carries a list of languages. An evaluator returns one object. */
+    return rnt_read_tag(reader) == RNT_ITEM_LIST ? offers_items : answer_items;
   case 'E':
     message->kind = RNT_MESSAGE_ERROR;
     message->id = rnt_read_u64(reader);
-    return "ssF";
+    return rnt_error_items;
   default:
     reader->failed = true;
-    return "";
+    return rnt_no_items;
   }
 }
 
 enum rnt_status rnt_kernel_decode(const void *bytes, size_t length,
                                   rnt_message *message) {
+  if (!message)
+    return RNT_STATUS_INVALID;
+  *message = (rnt_message){0};
+  if (!bytes || !length || length > RNT_FRAME_MAX)
+    return RNT_STATUS_INVALID;
+
   rnt_reader reader = rnt_reader_of(bytes, length);
   rnt_arena *arena = malloc(sizeof *arena);
   enum rnt_status status = RNT_STATUS_OK;
-  const char *schema;
+  const rnt_form *schema;
 
   *message = (rnt_message){.memory = arena};
   if (!arena)
     return RNT_STATUS_NO_MEMORY;
   *arena = rnt_arena_for(length);
-  schema = fields(&reader, message, &status);
+  schema = read_header(&reader, message, &status);
   message->count = rnt_read_items(&reader, arena, &message->items);
   if (arena->failed)
     status = RNT_STATUS_NO_MEMORY;
@@ -102,108 +109,80 @@ enum rnt_status rnt_kernel_decode(const void *bytes, size_t length,
 
 enum rnt_status rnt_kernel_receive(rnt_link *link, rnt_message *message) {
   rnt_buffer frame = {0};
-  enum rnt_status status = RNT_STATUS_DISCONNECTED;
-
+  if (!message)
+    return RNT_STATUS_INVALID;
   *message = (rnt_message){0};
-  if (rnt_channel_receive(link, &frame))
+  if (!link)
+    return RNT_STATUS_INVALID;
+  enum rnt_status status = rnt_channel_receive(link, &frame);
+  if (status == RNT_STATUS_OK) {
     status = rnt_kernel_decode(frame.bytes, frame.length, message);
-  else if (frame.failure)
-    status = frame.failure;
+    if (status != RNT_STATUS_OK)
+      rnt_channel_fail(link, status);
+  }
   rnt_buffer_free(&frame);
   return status;
 }
 
-/* Encoding */
-
-static enum rnt_status sent(rnt_link *link, rnt_buffer *frame, size_t start) {
-  enum rnt_status status = RNT_STATUS_OK;
-
-  rnt_wire_frame_end(frame, start);
-  if (frame->failure)
-    status = frame->failure;
-  else if (!rnt_channel_send(link, frame))
-    status = RNT_STATUS_DISCONNECTED;
-  rnt_buffer_free(frame);
-  return status;
-}
-
-enum rnt_status rnt_kernel_welcome(rnt_link *link, uint64_t id,
-                                   uint64_t session, uint64_t root) {
-  rnt_buffer frame = {0};
-  size_t start = rnt_wire_frame(&frame, 'R');
-  rnt_wire_u64(&frame, id);
-  rnt_wire_u16(&frame, RNT_WIRE_VERSION);
-  rnt_wire_u64(&frame, session);
-  rnt_wire_number(&frame, root);
-  return sent(link, &frame, start);
-}
-
-enum rnt_status rnt_kernel_reply(rnt_link *link, uint64_t id, int protocol,
-                                 int operation, const rnt_item *items,
-                                 size_t count) {
-  const rnt_operation *known = rnt_operation_of(protocol, operation);
-  rnt_buffer frame = {0};
-  size_t start;
-
-  if (!known || (count && !items) ||
-      !rnt_items_fit(known->results, items, count))
+enum rnt_status rnt_kernel_send(rnt_link *link, const rnt_message *message) {
+  if (!link || !message)
     return RNT_STATUS_INVALID;
-  start = rnt_wire_frame(&frame, 'R');
-  rnt_wire_u64(&frame, id);
-  for (size_t i = 0; i < count; i++)
-    rnt_wire_item(&frame, &items[i]);
-  return sent(link, &frame, start);
-}
-
-enum rnt_status rnt_kernel_refuse(rnt_link *link, uint64_t id,
-                                  const char *name, const char *message) {
+  const rnt_form *forms = rnt_no_items;
+  const rnt_signature *signature;
+  char kind;
+  switch (message->kind) {
+  case RNT_MESSAGE_WELCOME:
+    kind = 'R';
+    break;
+  case RNT_MESSAGE_REPLY:
+    signature = rnt_signature_of(message->protocol, message->method);
+    if (!signature)
+      return RNT_STATUS_INVALID;
+    forms = signature->results;
+    kind = 'R';
+    break;
+  case RNT_MESSAGE_ERROR:
+    forms = rnt_error_items;
+    kind = 'E';
+    break;
+  case RNT_MESSAGE_OFFERS:
+    kind = 'Q';
+    break;
+  case RNT_MESSAGE_EVALUATE:
+    forms = rnt_evaluation_items;
+    kind = 'Q';
+    break;
+  case RNT_MESSAGE_STOP:
+    kind = 'S';
+    break;
+  case RNT_MESSAGE_CLOSE_SESSION:
+    kind = 'C';
+    break;
+  default:
+    return RNT_STATUS_INVALID;
+  }
+  if (!rnt_items_fit(forms, message->items, message->count))
+    return RNT_STATUS_INVALID;
   rnt_buffer frame = {0};
-  size_t start = rnt_wire_frame(&frame, 'E');
-  rnt_wire_u64(&frame, id);
-  rnt_wire_string(&frame, name);
-  rnt_wire_string(&frame, message);
-  rnt_wire_list(&frame, 0);
-  return sent(link, &frame, start);
-}
-
-static size_t ask(rnt_buffer *frame, uint64_t id, uint8_t operation) {
-  size_t start = rnt_wire_frame(frame, 'Q');
-  rnt_wire_u64(frame, id);
-  rnt_wire_u8(frame, operation);
-  return start;
-}
-
-enum rnt_status rnt_kernel_ask_offers(rnt_link *link, uint64_t id) {
-  rnt_buffer frame = {0};
-  return sent(link, &frame, ask(&frame, id, RNT_ASK_OFFERS));
-}
-
-enum rnt_status rnt_kernel_ask_evaluate(rnt_link *link, uint64_t id,
-                                        uint64_t session, const char *language,
-                                        const char *source, uint64_t within,
-                                        const uint64_t *inputs, size_t count) {
-  rnt_buffer frame = {0};
-  size_t start = ask(&frame, id, RNT_ASK_EVALUATE);
-  rnt_wire_u64(&frame, session);
-  rnt_wire_string(&frame, language);
-  rnt_wire_string(&frame, source);
-  rnt_wire_number(&frame, within);
-  rnt_wire_list(&frame, count);
-  if (count && !inputs && !frame.failure)
-    frame.failure = RNT_STATUS_INVALID;
-  for (size_t i = 0; !frame.failure && i < count; i++)
-    rnt_wire_number(&frame, inputs[i]);
-  return sent(link, &frame, start);
-}
-
-enum rnt_status rnt_kernel_stop(rnt_link *link) {
-  rnt_buffer frame = {0};
-  return sent(link, &frame, rnt_wire_frame(&frame, 'S'));
-}
-
-enum rnt_status rnt_kernel_close_session(rnt_link *link, uint64_t session) {
-  rnt_buffer frame = {0};
-  size_t start = rnt_wire_frame(&frame, 'C');
-  rnt_wire_u64(&frame, session);
-  return sent(link, &frame, start);
+  size_t start = rnt_wire_frame(&frame, kind);
+  if (kind == 'R' || kind == 'E' || kind == 'Q')
+    rnt_wire_u64(&frame, message->id);
+  if (kind == 'Q')
+    rnt_wire_u8(&frame, message->kind == RNT_MESSAGE_OFFERS ? RNT_ASK_OFFERS
+                                                            : RNT_ASK_EVALUATE);
+  if (message->kind == RNT_MESSAGE_WELCOME) {
+    rnt_wire_u16(&frame, RNT_WIRE_VERSION);
+    rnt_wire_u64(&frame, message->session);
+    rnt_wire_number(&frame, message->handle);
+  } else if (message->kind == RNT_MESSAGE_EVALUATE || kind == 'C')
+    rnt_wire_u64(&frame, message->session);
+  for (size_t i = 0; i < message->count; i++)
+    rnt_wire_item(&frame, &message->items[i]);
+  rnt_wire_frame_end(&frame, start);
+  enum rnt_status status = frame.failure;
+  if (!status)
+    status = rnt_channel_send(link, &frame) ? RNT_STATUS_OK
+                                            : RNT_STATUS_DISCONNECTED;
+  rnt_buffer_free(&frame);
+  return status;
 }

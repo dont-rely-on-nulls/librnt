@@ -4,37 +4,32 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "wire.h"
-
-/* Writing */
+#include "internal.h"
 
 static void encode(unsigned char *at, uint64_t number, size_t width) {
   for (size_t i = 0; i < width; i++)
     at[i] = (unsigned char)(number >> 8 * (width - 1 - i));
 }
 
-/* Keeps the first reason a buffer failed. */
 static void fail(rnt_buffer *buffer, enum rnt_status why) {
   if (!buffer->failure)
     buffer->failure = why;
 }
 
-/* Doubling stops short of overflowing, and settles for what is needed
-   once doubling would. */
 unsigned char *rnt_buffer_extend(rnt_buffer *buffer, size_t length) {
+  const size_t limit = RNT_FRAME_MAX + 4;
+  if (length > limit - buffer->length)
+    fail(buffer, RNT_STATUS_INVALID);
+  if (buffer->failure || !length)
+    return NULL;
   size_t needed = buffer->length + length;
   unsigned char *at;
-
-  if (!buffer->failure && length > SIZE_MAX - buffer->length)
-    fail(buffer, RNT_STATUS_NO_MEMORY);
-  if (buffer->failure)
-    return NULL;
   if (needed > buffer->capacity) {
     size_t capacity = buffer->capacity ? buffer->capacity : 64;
     unsigned char *grown;
 
     while (capacity < needed)
-      capacity = capacity > SIZE_MAX / 2 ? needed : capacity * 2;
+      capacity = capacity > limit / 2 ? limit : capacity * 2;
     grown = realloc(buffer->bytes, capacity);
     if (!grown) {
       fail(buffer, RNT_STATUS_NO_MEMORY);
@@ -110,7 +105,6 @@ static void count(rnt_buffer *buffer, size_t count) {
   rnt_wire_u32(buffer, (uint32_t)count);
 }
 
-// claims items but points nowhere: trash
 static bool present(rnt_buffer *buffer, const void *items, size_t count) {
   if (count && !items)
     fail(buffer, RNT_STATUS_INVALID);
@@ -188,7 +182,8 @@ static void tuples(rnt_buffer *buffer, const rnt_tuple *tuples, size_t count) {
     rnt_wire_tuple(buffer, &tuples[i]);
 }
 
-void rnt_wire_item(rnt_buffer *buffer, const rnt_item *item) {
+static void write_item(rnt_buffer *buffer, const rnt_session *session,
+                       const rnt_item *item, unsigned depth) {
   const rnt_relation *relation = &item->as.relation;
 
   switch (item->type) {
@@ -205,7 +200,16 @@ void rnt_wire_item(rnt_buffer *buffer, const rnt_item *item) {
     rnt_wire_string(buffer, item->as.string);
     break;
   case RNT_ITEM_HANDLE:
-    rnt_wire_number(buffer, item->as.handle);
+    if (!session || !item->as.handle || item->as.handle->session != session)
+      fail(buffer, RNT_STATUS_INVALID);
+    else
+      rnt_wire_number(buffer, item->as.handle->number);
+    break;
+  case RNT_ITEM_HANDLE_ID:
+    if (session)
+      fail(buffer, RNT_STATUS_INVALID);
+    else
+      rnt_wire_number(buffer, item->as.handle_id);
     break;
   case RNT_ITEM_ATTRIBUTE:
     rnt_wire_attribute(buffer, &item->as.attribute);
@@ -230,14 +234,16 @@ void rnt_wire_item(rnt_buffer *buffer, const rnt_item *item) {
     tuples(buffer, item->as.multigroup.tuples, item->as.multigroup.cardinality);
     break;
   case RNT_ITEM_LIST:
+    if (depth >= RNT_LIST_DEPTH_MAX) {
+      fail(buffer, RNT_STATUS_INVALID);
+      break;
+    }
     rnt_wire_list(buffer, item->as.list.count);
     for (size_t i = 0;
          present(buffer, item->as.list.items, item->as.list.count) &&
          i < item->as.list.count;
          i++) {
-      if (item->as.list.items[i].type == RNT_ITEM_LIST)
-        fail(buffer, RNT_STATUS_INVALID);
-      rnt_wire_item(buffer, &item->as.list.items[i]);
+      write_item(buffer, session, &item->as.list.items[i], depth + 1);
     }
     break;
   default:
@@ -245,63 +251,14 @@ void rnt_wire_item(rnt_buffer *buffer, const rnt_item *item) {
   }
 }
 
-/* Operations */
-
-static const rnt_operation operations[] = {
-    {RNT_PROTOCOL_DIRECTORY, RNT_DIRECTORY_LIST, "", "S"},
-    {RNT_PROTOCOL_DIRECTORY, RNT_DIRECTORY_FIND, "s", "h"},
-    {RNT_PROTOCOL_REGISTRY, RNT_REGISTRY_UPDATE, "soe", ""},
-    {RNT_PROTOCOL_ASSOCIATIVE, RNT_ASSOCIATIVE_UPDATE, "se", "h"},
-    {RNT_PROTOCOL_RELATION, RNT_RELATION_CURSOR, "", "h"},
-    {RNT_PROTOCOL_RELATION, RNT_RELATION_CONTAINS, "t", "b"},
-    {RNT_PROTOCOL_RELATION, RNT_RELATION_HEADING, "", "A"},
-    {RNT_PROTOCOL_CURSOR, RNT_CURSOR_FETCH, "i", "bT"},
-    {RNT_PROTOCOL_PROGRAM, RNT_PROGRAM_EVALUATE, "ssH", "h"},
-};
-
-const rnt_operation *rnt_operation_of(int protocol, int operation) {
-  for (size_t i = 0; i < sizeof operations / sizeof *operations; i++)
-    if (operations[i].protocol == protocol &&
-        operations[i].operation == operation)
-      return &operations[i];
-  return NULL;
+void rnt_wire_item(rnt_buffer *buffer, const rnt_item *item) {
+  write_item(buffer, NULL, item, 0);
 }
 
-static bool fits(char letter, const rnt_item *item) {
-  switch (letter) {
-  case 'o':
-    return item->type == RNT_ITEM_NOTHING || item->type == RNT_ITEM_HANDLE;
-  case 'e':
-    return item->type == RNT_ITEM_NOTHING || item->type == RNT_ITEM_HANDLE ||
-           item->type == RNT_ITEM_RELATION ||
-           item->type == RNT_ITEM_MULTIGROUP;
-  case 'S':
-  case 'H':
-  case 'A':
-  case 'T':
-  case 'F':
-    if (item->type != RNT_ITEM_LIST)
-      return false;
-    // S, H, A, T and F are lists of s, h, a, t and f
-    for (size_t i = 0; i < item->as.list.count; i++)
-      if (item->as.list.items[i].type != letter - 'A' + 'a')
-        return false;
-    return true;
-  default:
-    return item->type == (enum rnt_item_type)letter;
-  }
+void rnt_write_argument(rnt_buffer *buffer, const rnt_session *session,
+                        const rnt_item *item) {
+  write_item(buffer, session, item, 0);
 }
-
-bool rnt_items_fit(const char *schema, const rnt_item *items, size_t count) {
-  size_t i = 0;
-
-  for (; schema[i]; i++)
-    if (i >= count || !fits(schema[i], &items[i]))
-      return false;
-  return i == count;
-}
-
-/* Reading */
 
 bool rnt_slice_is(rnt_slice slice, const char *text) {
   return slice.length == strlen(text) &&
@@ -378,8 +335,7 @@ bool rnt_read_bool(rnt_reader *reader) {
   return truth == 1;
 }
 
-/* Back from two's complement without relying on how a conversion to
-   a signed type treats what does not fit. */
+/* Decode two's complement using only values representable as int64_t. */
 int64_t rnt_read_integer(rnt_reader *reader) {
   uint64_t number = expect(reader, 'i') ? rnt_read_u64(reader) : 0;
 
@@ -414,11 +370,6 @@ bool rnt_read_done(const rnt_reader *reader) {
   return !reader->failed && reader->at == reader->end;
 }
 
-/* Decoding */
-
-// The worst a frame can do is a list of empty strings, which decodes to
-// about eleven times its size. Twelve times the frame is plenty, and
-// anything asking for more is garbage.
 typedef union {
   long double number;
   long long integer;
@@ -460,6 +411,8 @@ void *rnt_arena_allocate(rnt_arena *arena, size_t count, size_t size) {
     return refused(arena);
   if (!arena->chunks || bytes > arena->room - arena->used) {
     size_t room = bytes > CHUNK ? bytes : CHUNK;
+    if (room > SIZE_MAX - sizeof(rnt_chunk))
+      return refused(arena);
     rnt_chunk *chunk = malloc(sizeof *chunk + room);
 
     if (!chunk)
@@ -565,9 +518,8 @@ static const rnt_tuple *tuples_of(rnt_reader *reader, rnt_arena *arena,
   return read;
 }
 
-// Lists of lists are garbage, so this never nests deeper than one.
 static void read_item(rnt_reader *reader, rnt_arena *arena, rnt_item *item,
-                      bool nested) {
+                      unsigned depth) {
   rnt_attribute *heading;
   rnt_item *items;
 
@@ -585,8 +537,8 @@ static void read_item(rnt_reader *reader, rnt_arena *arena, rnt_item *item,
   case RNT_ITEM_STRING:
     item->as.string = rnt_read_text(reader, arena);
     break;
-  case RNT_ITEM_HANDLE:
-    item->as.handle = rnt_read_handle(reader);
+  case RNT_ITEM_HANDLE_ID:
+    item->as.handle_id = rnt_read_handle(reader);
     break;
   case RNT_ITEM_ATTRIBUTE:
     rnt_read_attribute(reader, arena, &item->as.attribute);
@@ -602,7 +554,8 @@ static void read_item(rnt_reader *reader, rnt_arena *arena, rnt_item *item,
     item->as.relation.degree = rnt_read_list(reader, RNT_WIRE_ATTRIBUTE);
     item->as.relation.heading = heading =
         room(reader, arena, item->as.relation.degree, sizeof *heading);
-    for (size_t i = 0; heading && i < item->as.relation.degree; i++)
+    for (size_t i = 0;
+         heading && i < item->as.relation.degree && !reader->failed; i++)
       rnt_read_attribute(reader, arena, &heading[i]);
     item->as.relation.tuples =
         tuples_of(reader, arena, &item->as.relation.cardinality);
@@ -613,16 +566,16 @@ static void read_item(rnt_reader *reader, rnt_arena *arena, rnt_item *item,
         tuples_of(reader, arena, &item->as.multigroup.cardinality);
     break;
   case RNT_ITEM_LIST:
-    if (nested) {
+    if (depth >= RNT_LIST_DEPTH_MAX) {
       reader->failed = true;
       break;
     }
-    item->as.list.count = rnt_read_list(reader, RNT_WIRE_STRING);
+    item->as.list.count = rnt_read_list(reader, 1);
     item->as.list.items = items =
         room(reader, arena, item->as.list.count, sizeof *items);
     for (size_t i = 0; items && i < item->as.list.count && !reader->failed;
          i++)
-      read_item(reader, arena, &items[i], true);
+      read_item(reader, arena, &items[i], depth + 1);
     break;
   default:
     reader->failed = true;
@@ -631,16 +584,38 @@ static void read_item(rnt_reader *reader, rnt_arena *arena, rnt_item *item,
 
 size_t rnt_read_items(rnt_reader *reader, rnt_arena *arena,
                       const rnt_item **items) {
-  rnt_item *read = room(reader, arena, RNT_ITEMS_MAX, sizeof *read);
-  size_t count = 0;
-
-  for (; read && !reader->failed && reader->at < reader->end; count++) {
-    if (count == RNT_ITEMS_MAX) {
-      reader->failed = true;
-      break;
+  /* Top-level items have no count prefix. Charge the arena once their count is known. */
+  rnt_item local[4];
+  rnt_item *pending = local;
+  size_t count = 0, capacity = sizeof local / sizeof *local;
+  *items = NULL;
+  while (!reader->failed && reader->at < reader->end) {
+    if (count == capacity) {
+      size_t available = (arena->budget - arena->spent) / sizeof *pending;
+      size_t next = capacity <= available / 2 ? capacity * 2 : available;
+      rnt_item *grown = NULL;
+      bool first_growth = pending == local;
+      if (next > capacity)
+        grown = realloc(first_growth ? NULL : pending, next * sizeof *pending);
+      if (!grown) {
+        arena->failed = reader->failed = true;
+        break;
+      }
+      if (first_growth)
+        memcpy(grown, local, sizeof local);
+      pending = grown;
+      capacity = next;
     }
-    read_item(reader, arena, &read[count], false);
+    read_item(reader, arena, &pending[count++], 0);
   }
-  *items = read;
-  return count;
+  if (!reader->failed && count) {
+    rnt_item *stored = room(reader, arena, count, sizeof *stored);
+    if (stored) {
+      memcpy(stored, pending, count * sizeof *stored);
+      *items = stored;
+    }
+  }
+  if (pending != local)
+    free(pending);
+  return reader->failed ? 0 : count;
 }

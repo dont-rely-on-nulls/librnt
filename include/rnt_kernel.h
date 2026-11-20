@@ -1,93 +1,39 @@
 /* SPDX-License-Identifier: LGPL-3.0-or-later
    Copyright 2026 Marcos Magueta <maguetamarcos@gmail.com> */
 
-/* rnt_kernel.h: the kernel's side of RNT's native protocol */
-
 #ifndef RNT_KERNEL_H
 #define RNT_KERNEL_H
 
 #include "rnt.h"
 
-/* Links
-
-   A link is the kernel's end of a subsystem running in its own
-   process. Whatever the subsystem does only fails the link, after
-   which the process is reaped and may be started again. librnt keeps
-   no other state for the kernel. */
+/* A link connects the kernel to one subsystem process. Serialize calls on each link. */
 typedef struct rnt_channel rnt_link;
 
-/* Arguments end with NULL. Gives NULL when it cannot start. */
+/* Supply argv[0] as the first argument and NULL after the last. */
 RNT_API rnt_link *rnt_kernel_spawn(const char *program,
                                    const char *const *arguments);
 
-/* Whether the process exited, with its exit code or killing signal. */
+/* When signaled is true, code holds the signal number. */
 RNT_API bool rnt_kernel_exited(rnt_link *link, bool wait, int *code,
                                bool *signaled);
 
 RNT_API void rnt_kernel_kill(rnt_link *link);
 
-/* Kills a process still running, reaps it, and frees the link. */
+/* Kills a running child and reaps it before freeing the link. */
 RNT_API void rnt_kernel_close(rnt_link *link);
 
-/* Items
-
-   What a frame carries after its fields, each typed by its tag on the
-   wire. Handles are numbers in the frame's session. A list holds no
-   lists. */
-enum rnt_item_type {
-  RNT_ITEM_NOTHING = 'n',
-  RNT_ITEM_BOOL = 'b',
-  RNT_ITEM_INTEGER = 'i',
-  RNT_ITEM_STRING = 's',
-  RNT_ITEM_HANDLE = 'h',
-  RNT_ITEM_ATTRIBUTE = 'a',
-  RNT_ITEM_FIELD = 'f',
-  RNT_ITEM_TUPLE = 't',
-  RNT_ITEM_RELATION = 'r',
-  RNT_ITEM_MULTIGROUP = 'm',
-  RNT_ITEM_LIST = 'l'
-};
-
-typedef struct rnt_item rnt_item;
-
-struct rnt_item {
-  enum rnt_item_type type;
-  union {
-    bool truth;
-    int64_t integer;
-    const char *string;
-    uint64_t handle;
-    rnt_attribute attribute;
-    rnt_field field;
-    rnt_tuple tuple;
-    rnt_relation relation;
-    rnt_multigroup multigroup;
-    struct {
-      const rnt_item *items;
-      size_t count;
-    } list;
-  } as;
-};
-
-/* Messages
-
-   What the subsystem sends: its fields, zero where a kind has none,
-   and its items.
-
-   HELLO    id; its name
-   REQUEST  id, session, handle, protocol, operation; the arguments,
-            which are known when the operation is, and fit it
-   DROP     session, handle
-   BYE
-   REPLY    id; the languages offered, or the entry evaluated to
-   ERROR    id; a name, a message and fields */
 enum rnt_message_kind {
-  RNT_MESSAGE_HELLO = 1,
-  RNT_MESSAGE_REQUEST,
-  RNT_MESSAGE_DROP,
+  RNT_MESSAGE_HELLO = 1, /* id and subsystem name */
+  RNT_MESSAGE_REQUEST, /* id, session, receiver, protocol, method and arguments */
+  RNT_MESSAGE_DROP, /* session and handle */
   RNT_MESSAGE_BYE,
-  RNT_MESSAGE_REPLY,
-  RNT_MESSAGE_ERROR
+  RNT_MESSAGE_REPLY, /* id and results. Set protocol and method when sending. */
+  RNT_MESSAGE_ERROR, /* id, then name, message and a list of fields */
+  RNT_MESSAGE_WELCOME, /* id, session and root handle */
+  RNT_MESSAGE_OFFERS, /* id. The reply carries a list of languages. */
+  RNT_MESSAGE_EVALUATE, /* id, session, then language, source, within and inputs */
+  RNT_MESSAGE_STOP,
+  RNT_MESSAGE_CLOSE_SESSION /* session */
 };
 
 typedef struct {
@@ -96,56 +42,30 @@ typedef struct {
   uint64_t session;
   uint64_t handle;
   int protocol;
-  int operation;
-  bool known;
+  int method;
+  bool known; /* The request matches a known protocol and method. */
   const rnt_item *items;
   size_t count;
   void *memory;
 } rnt_message;
 
-/* Whether a message, or the subsystem leaving, arrives within the time,
-   so the kernel can wait without blocking for good. */
+/* Ready means a complete frame or a terminal error.
+   Zero polls. A negative timeout waits indefinitely. */
 RNT_API bool rnt_kernel_ready(rnt_link *link, int milliseconds);
 
-/* Waits for the next message. Gives DISCONNECTED when the subsystem is
-   gone, INVALID when malformed, UNSUPPORTED for a hello of another
-   version, and NO_MEMORY past what a frame may take. On failure the
-   message is empty and the link is done. Decoding does the same for
-   bytes at hand. */
+/* Receive blocks for a message. A transport or decoding error ends the link. */
 RNT_API enum rnt_status rnt_kernel_receive(rnt_link *link,
                                            rnt_message *message);
 
+/* Decode a frame body starting at its kind byte, after the length prefix. */
 RNT_API enum rnt_status rnt_kernel_decode(const void *bytes, size_t length,
                                           rnt_message *message);
 
+/* Free each received or decoded message before reusing its storage. */
 RNT_API void rnt_kernel_message_free(rnt_message *message);
 
-/* Sending gives OK, INVALID when it cannot be written, or DISCONNECTED.
-   A hello is welcomed with the session and root it plugs into. A
-   request is answered with results that must fit its operation, or
-   refused. A closed session drops every handle the subsystem holds in
-   it. */
-RNT_API enum rnt_status rnt_kernel_welcome(rnt_link *link, uint64_t id,
-                                           uint64_t session, uint64_t root);
-
-RNT_API enum rnt_status rnt_kernel_reply(rnt_link *link, uint64_t id,
-                                         int protocol, int operation,
-                                         const rnt_item *items, size_t count);
-
-RNT_API enum rnt_status rnt_kernel_refuse(rnt_link *link, uint64_t id,
-                                          const char *name,
-                                          const char *message);
-
-RNT_API enum rnt_status rnt_kernel_ask_offers(rnt_link *link, uint64_t id);
-
-RNT_API enum rnt_status
-rnt_kernel_ask_evaluate(rnt_link *link, uint64_t id, uint64_t session,
-                        const char *language, const char *source,
-                        uint64_t within, const uint64_t *inputs, size_t count);
-
-RNT_API enum rnt_status rnt_kernel_stop(rnt_link *link);
-
-RNT_API enum rnt_status rnt_kernel_close_session(rnt_link *link,
-                                                 uint64_t session);
+/* Send borrows the items. Use HANDLE_ID for kernel-side handles. */
+RNT_API enum rnt_status rnt_kernel_send(rnt_link *link,
+                                        const rnt_message *message);
 
 #endif

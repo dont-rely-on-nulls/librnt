@@ -1,10 +1,3 @@
-# NMakefile: building with MSVC, from a Developer Command Prompt.
-#   nmake /f NMakefile         builds build\rnt.dll, along with its
-#                              import library build\rnt.lib
-#   nmake /f NMakefile test    builds and runs the tests
-# NMake has no wildcards for this, so a new source or test is listed
-# here by hand.
-
 CC = cl
 LINK = link
 
@@ -13,7 +6,7 @@ CFLAGS = /nologo /std:c17 /W4 /O2 /Z7 /Iinclude /D_CRT_SECURE_NO_WARNINGS
 SHARED = build\rnt.dll
 IMPORT = build\rnt.lib
 OBJECTS = build\channel.obj build\kernel.obj build\lifecycle.obj \
-	build\plug.obj build\protocol.obj build\wire.obj
+	build\plug.obj build\protocol.obj build\schema.obj build\session.obj build\wire.obj
 HEADERS = include\channel.h include\internal.h include\rnt.h \
 	include\rnt_kernel.h include\wire.h
 TESTS = build\tests\wire.exe build\tests\kernel.exe build\tests\lifecycle.exe \
@@ -31,19 +24,16 @@ $(OBJECTS): $(HEADERS) NMakefile
 	@if not exist build mkdir build
 	$(CC) $(CFLAGS) /DRNT_BUILD /c /Fobuild\ $<
 
-# Runs every test program, stopping at the first that fails.
 test: $(TESTS)
 	!$**
 
-# Tests link the objects themselves, so they reach what the DLL keeps
-# hidden, and run without searching for it.
+# Tests link the objects to reach private functions.
 $(TESTS): tests\check.h tests\plugged.h $(HEADERS) $(OBJECTS)
 
 {tests}.c{build\tests}.exe:
 	@if not exist build\tests mkdir build\tests
 	$(CC) $(CFLAGS) /Isrc /Fobuild\tests\ /Fe$@ $< $(OBJECTS)
 
-# Fuzzes the kernel's decoder for FUZZ_SECONDS, or until it crashes.
 fuzz:
 	@if not exist build\fuzz\corpus mkdir build\fuzz\corpus
 	$(CC) /nologo /std:c17 /Zi /Iinclude /D_CRT_SECURE_NO_WARNINGS \

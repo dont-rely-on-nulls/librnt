@@ -37,7 +37,6 @@ void rnt_plug_bye(rnt_plug *plug) {
   rnt_plug_disconnect(plug);
 }
 
-// A name, a message and fields. Anything else is garbage and we hang up.
 static enum rnt_status status_of(rnt_plug *plug, rnt_reader *error) {
   rnt_arena arena = rnt_arena_for((size_t)(error->end - error->at));
   const rnt_item *items;
@@ -45,7 +44,7 @@ static enum rnt_status status_of(rnt_plug *plug, rnt_reader *error) {
   enum rnt_status status = RNT_STATUS_REFUSED;
 
   if (arena.failed || !rnt_read_done(error) ||
-      !rnt_items_fit("ssF", items, count))
+      !rnt_items_fit(rnt_error_items, items, count))
     status = rnt_plug_disconnect(plug);
   else if (strcmp(items[0].as.string, "not-found") == 0)
     status = RNT_STATUS_NOT_FOUND;
@@ -53,14 +52,15 @@ static enum rnt_status status_of(rnt_plug *plug, rnt_reader *error) {
     status = RNT_STATUS_UNSUPPORTED;
   else if (strcmp(items[0].as.string, "disconnected") == 0)
     status = RNT_STATUS_DISCONNECTED;
+  else if (strcmp(items[0].as.string, "invalid") == 0)
+    status = RNT_STATUS_INVALID;
+  else if (strcmp(items[0].as.string, "no-memory") == 0)
+    status = RNT_STATUS_NO_MEMORY;
   rnt_arena_free(&arena);
   return status;
 }
 
-/* The kernel unplugs the subsystem by asking it to stop. The stopping
-   body runs while calls still reach the kernel, and the bye after it
-   says the subsystem is done. The body runs once, even if the kernel
-   asks again while it runs. */
+/* The stop callback can make a call that receives another stop request. */
 static void stop(rnt_plug *plug) {
   rnt_stop_body stopping = plug->stopping;
   plug->stopping = NULL;
@@ -104,21 +104,17 @@ struct rnt_answer {
   bool given;
 };
 
-/* The answer is sent at once, so whatever the body does after, such as
-   releasing the handle it answered with, reaches the kernel after it. */
-enum rnt_status rnt_answer_with(rnt_answer *answer, const rnt_entry *relation) {
+enum rnt_status rnt_answer_with(rnt_answer *answer, const rnt_item *object) {
   rnt_buffer frame = {0};
-  rnt_item item;
   size_t start;
 
-  if (!answer || answer->given || !relation)
+  if (!answer || answer->given)
     return RNT_STATUS_INVALID;
-  item = rnt_item_of_entry(answer->session, relation);
-  if (item.type == RNT_ITEM_NOTHING || !rnt_items_fit("e", &item, 1))
+  if (!rnt_items_fit(FORMS(FORM_OBJECT), object, 1))
     return RNT_STATUS_INVALID;
   start = rnt_wire_frame(&frame, 'R');
   rnt_wire_u64(&frame, answer->id);
-  rnt_wire_item(&frame, &item);
+  rnt_write_argument(&frame, answer->session, object);
   if (frame.failure) {
     enum rnt_status failure = frame.failure;
     rnt_buffer_free(&frame);
@@ -130,35 +126,29 @@ enum rnt_status rnt_answer_with(rnt_answer *answer, const rnt_entry *relation) {
                                         : RNT_STATUS_DISCONNECTED;
 }
 
-/* The handles a program is lent are the kernel's, so they live in the
-   arena and are never dropped. */
 static void evaluate(rnt_plug *plug, uint64_t id, rnt_reader *frame) {
   rnt_arena arena = rnt_arena_for((size_t)(frame->end - frame->at));
-  rnt_session *session = rnt_session_of(plug, rnt_read_u64(frame));
-  rnt_answer answer = {session, id, false};
+  uint64_t session_id = rnt_read_u64(frame);
+  rnt_answer answer = {.id = id};
   rnt_program program = {0};
   rnt_offering *offer = NULL;
-  rnt_handle *lent = NULL, within = {0, session};
+  rnt_handle *lent = NULL, within = {0};
   const rnt_handle **inputs = NULL;
   enum rnt_status status = RNT_STATUS_OK;
   const rnt_item *items;
   size_t count = rnt_read_items(frame, &arena, &items);
-  bool fit = rnt_read_done(frame) && rnt_items_fit("sshH", items, count);
+  bool fit =
+      rnt_read_done(frame) && rnt_items_fit(rnt_evaluation_items, items, count);
 
   if (fit) {
     program.evaluator = items[0].as.string;
     program.source = items[1].as.string;
-    within.number = items[2].as.handle;
+    within.number = items[2].as.handle_id;
     program.arity = items[3].as.list.count;
     lent = rnt_arena_allocate(&arena, program.arity, sizeof *lent);
     inputs = rnt_arena_allocate(&arena, program.arity, sizeof *inputs);
   }
-  for (size_t i = 0; lent && inputs && i < program.arity; i++) {
-    lent[i] = (rnt_handle){items[3].as.list.items[i].as.handle, session};
-    inputs[i] = &lent[i];
-  }
-  program.inputs = inputs;
-  if (arena.failed || !session)
+  if (arena.failed)
     status = RNT_STATUS_NO_MEMORY;
   else if (!fit)
     status = RNT_STATUS_INVALID;
@@ -170,12 +160,22 @@ static void evaluate(rnt_plug *plug, uint64_t id, rnt_reader *frame) {
   if (status == RNT_STATUS_OK && !offer)
     status = RNT_STATUS_UNSUPPORTED;
   if (status == RNT_STATUS_OK) {
-    // held, or a close in the middle of the body frees what lent points to
-    rnt_session_hold(session);
+    answer.session = rnt_session_acquire(plug, session_id);
+    if (!answer.session)
+      status = RNT_STATUS_NO_MEMORY;
+  }
+  if (status == RNT_STATUS_OK) {
+    within.session = answer.session;
+    for (size_t i = 0; i < program.arity; i++) {
+      lent[i] = (rnt_handle){.number = items[3].as.list.items[i].as.handle_id,
+                             .session = answer.session};
+      inputs[i] = &lent[i];
+    }
+    program.inputs = inputs;
     plug->depth++;
     status = offer->body(&program, &within, &answer, offer->data);
     plug->depth--;
-    rnt_session_let_go(session);
+    rnt_session_release(answer.session);
   }
   if (!answer.given)
     refuse(plug, id, status == RNT_STATUS_OK ? RNT_STATUS_INVALID : status,
@@ -185,9 +185,6 @@ static void evaluate(rnt_plug *plug, uint64_t id, rnt_reader *frame) {
 
 enum asking { ASKED, STOPPED, OUT_OF_TURN };
 
-/* Answers the frame if it is the kernel asking, rather than answering:
-   to stop, to close a session, for what the subsystem offers, or to
-   evaluate a program. */
 static enum asking asked(rnt_plug *plug, char kind, rnt_reader *frame) {
   if (kind == 'S' && rnt_read_done(frame)) {
     stop(plug);
@@ -216,9 +213,8 @@ static enum asking asked(rnt_plug *plug, char kind, rnt_reader *frame) {
   return OUT_OF_TURN;
 }
 
-// The kernel may cross our request with an ask, and then answer the
-// request while a call nested in that ask is still waiting. That answer
-// sits here until its own call waits again.
+/* An evaluator can call back into the kernel while an outer call waits.
+   Either reply can arrive first. Each call keeps the frame addressed to it. */
 struct rnt_call {
   uint64_t id;
   rnt_buffer early;
@@ -245,9 +241,6 @@ static enum rnt_status result(rnt_plug *plug, const rnt_buffer *answer,
   return replied ? RNT_STATUS_OK : status_of(plug, results);
 }
 
-/* A request that cannot be written is never sent. Anything out of
-   turn, a bye included, leaves the two ends unable to agree on what
-   comes next, so it disconnects. */
 enum rnt_status rnt_plug_call(rnt_plug *plug, const rnt_buffer *request,
                               uint64_t id, rnt_buffer *answer,
                               rnt_reader *results) {
@@ -273,7 +266,7 @@ enum rnt_status rnt_plug_call(rnt_plug *plug, const rnt_buffer *request,
       status = result(plug, answer, results);
       break;
     }
-    if (!rnt_channel_receive(plug->channel, answer)) {
+    if (rnt_channel_receive(plug->channel, answer) != RNT_STATUS_OK) {
       status = rnt_plug_disconnect(plug);
       break;
     }
@@ -302,7 +295,7 @@ enum rnt_status rnt_plug_poll(rnt_plug *plug) {
   rnt_buffer frame = {0};
   while (plug->channel && rnt_channel_pending(plug->channel, 0)) {
     rnt_reader reader;
-    if (!rnt_channel_receive(plug->channel, &frame)) {
+    if (rnt_channel_receive(plug->channel, &frame) != RNT_STATUS_OK) {
       rnt_plug_disconnect(plug);
       break;
     }
@@ -317,7 +310,8 @@ enum rnt_status rnt_plug_poll(rnt_plug *plug) {
 enum rnt_status rnt_plug_serve(rnt_plug *plug) {
   rnt_buffer frame = {0};
   enum asking asking = OUT_OF_TURN;
-  while (plug->channel && rnt_channel_receive(plug->channel, &frame)) {
+  while (plug->channel &&
+         rnt_channel_receive(plug->channel, &frame) == RNT_STATUS_OK) {
     rnt_reader reader = rnt_reader_of(frame.bytes, frame.length);
     asking = asked(plug, (char)rnt_read_u8(&reader), &reader);
     if (asking != ASKED)

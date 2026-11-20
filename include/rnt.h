@@ -1,8 +1,6 @@
 /* SPDX-License-Identifier: LGPL-3.0-or-later
    Copyright 2026 Marcos Magueta <maguetamarcos@gmail.com> */
 
-/* rnt.h: a subsystem's side of RNT's native protocol */
-
 #ifndef RNT_H
 #define RNT_H
 
@@ -18,68 +16,45 @@
 #define RNT_API
 #endif
 
-/* Handles
-
-   A handle is something the subsystem holds, and holding it is what
-   allows its use. It always stands for an object in the kernel. */
+/* A session-scoped reference to a kernel object. */
 typedef struct rnt_handle rnt_handle;
 
 enum rnt_status {
   RNT_STATUS_OK = 1,
-  RNT_STATUS_NOT_FOUND,    /* the name names nothing under the handle */
-  RNT_STATUS_UNSUPPORTED,  /* the handle does not support that protocol */
-  RNT_STATUS_REFUSED,      /* the kernel refused the change */
-  RNT_STATUS_DISCONNECTED, /* the kernel is gone, or we were unplugged */
-  RNT_STATUS_INVALID,      /* the request cannot be written, nor sent */
-  RNT_STATUS_NO_MEMORY     /* librnt ran out of memory */
+  RNT_STATUS_NOT_FOUND,
+  RNT_STATUS_UNSUPPORTED,
+  RNT_STATUS_REFUSED,
+  RNT_STATUS_DISCONNECTED,
+  RNT_STATUS_INVALID,
+  RNT_STATUS_NO_MEMORY
 };
 
-/* Lifecycle
-
-   Starting initializes the subsystem upon registration or by request
-   of a supervisor to restart, giving its first handle. Every other
-   handle is retrieved through it. A subsystem starts once per
-   process, so restarting it means starting a new process, and
-   starting again is refused.
-
-   The kernel stops the subsystem when it unplugs it. The stopping
-   body runs first, while the kernel can still be called, so the
-   subsystem shuts down gracefully, and once it returns every call is
-   disconnected. The body may be NULL. Stopping on one's own is for a
-   subsystem that leaves by itself, after its own cleanup. Either
-   way, handles are still released, which then only frees them.
-
-   Serving waits for the kernel's requests and answers them, for a
-   subsystem with nothing else to do. It gives OK once the kernel
-   stops the subsystem, and DISCONNECTED if the kernel is gone
-   without asking. Polling answers only what the kernel has asked
-   already, for a subsystem busy with other things, and gives OK for
-   as long as the subsystem stays plugged. */
+/* The kernel's stop request runs this callback while the link is still open. */
 typedef void (*rnt_stop_body)(void *data);
 
+/* Start once per process. Use one thread for subsystem calls.
+   The caller owns the root handle. */
 RNT_API enum rnt_status rnt_start(const char *name, rnt_stop_body stopping,
                                   void *data, rnt_handle **root);
 
+/* Blocks until the kernel requests a stop (OK) or the link fails (DISCONNECTED). */
 RNT_API enum rnt_status rnt_serve(void);
 
+/* Dispatches pending requests without waiting for the next frame. */
 RNT_API enum rnt_status rnt_poll(void);
 
 RNT_API void rnt_stop(void);
 
+/* Release each owned reference, even after its session closes. */
 RNT_API void rnt_release(rnt_handle *handle);
 
-/* Releases the handle when the variable leaves its scope. Only GNU C
-   and Clang support this, so code that also builds elsewhere calls
-   rnt_release itself. */
 #ifdef __GNUC__
-RNT_API void rnt_release_scoped(rnt_handle **handle);
+static inline void rnt_release_scoped(rnt_handle **handle) {
+  rnt_release(*handle);
+}
 #define rnt_scoped __attribute__((cleanup(rnt_release_scoped)))
 #endif
 
-/* Values
-
-   The subsystem builds these in its own memory, and the kernel
-   borrows them for the length of a call. */
 enum rnt_value_type { RNT_VALUE_STRING = 1, RNT_VALUE_INTEGER };
 
 typedef struct {
@@ -100,19 +75,12 @@ typedef struct {
   rnt_value value;
 } rnt_field;
 
-/* The type names the relation the tuple claims to belong to. */
 typedef struct {
-  const char *type;
+  const char *type; /* Name of the relation this tuple belongs to. */
   const rnt_field *fields;
   size_t degree;
 } rnt_tuple;
 
-/* Objects
-
-   An object here is one the subsystem holds in its own memory. The
-   kernel makes its own from it when it is registered. A relation is
-   its heading and the tuples it holds, every one of them fitting the
-   heading, and none when there are no tuples. */
 typedef struct {
   const rnt_attribute *heading;
   size_t degree;
@@ -122,138 +90,105 @@ typedef struct {
 
 typedef struct {
   const rnt_tuple *tuples;
-  size_t cardinality; /* Really this should be Aleph0, Continuum, Finite and
-                         Bounded, but for now this is fine. */
+  size_t cardinality;
 } rnt_multigroup;
 
-enum rnt_object_type { RNT_OBJECT_RELATION = 1, RNT_OBJECT_MULTIGROUP };
+enum rnt_item_type {
+  RNT_ITEM_NOTHING = 'n',
+  RNT_ITEM_BOOL = 'b',
+  RNT_ITEM_INTEGER = 'i',
+  RNT_ITEM_STRING = 's',
+  RNT_ITEM_HANDLE = 'H',    /* Subsystems pass an opaque handle. */
+  RNT_ITEM_HANDLE_ID = 'h', /* The kernel uses its number within the session. */
+  RNT_ITEM_ATTRIBUTE = 'a',
+  RNT_ITEM_FIELD = 'f',
+  RNT_ITEM_TUPLE = 't',
+  RNT_ITEM_RELATION = 'r',
+  RNT_ITEM_MULTIGROUP = 'm',
+  RNT_ITEM_LIST = 'l'
+};
 
-typedef struct {
-  enum rnt_object_type type;
+typedef struct rnt_item rnt_item;
+
+struct rnt_item {
+  enum rnt_item_type type;
   union {
-    const rnt_relation *relation;
-    const rnt_multigroup *multigroup;
-  } as;
-} rnt_object;
-
-/* What a name is bound to: an object the kernel has, by a handle to
-   it, or an object of the subsystem's own. */
-enum rnt_entry_type { RNT_ENTRY_HANDLE = 1, RNT_ENTRY_OBJECT };
-
-typedef struct {
-  enum rnt_entry_type type;
-  union {
+    bool truth;
+    int64_t integer;
+    const char *string;
     const rnt_handle *handle;
-    const rnt_object *object;
+    uint64_t handle_id;
+    rnt_attribute attribute;
+    rnt_field field;
+    rnt_tuple tuple;
+    rnt_relation relation;
+    rnt_multigroup multigroup;
+    struct {
+      const rnt_item *items;
+      size_t count;
+    } list;
   } as;
-} rnt_entry;
+};
 
-/* Protocols
-
-   Everything asked of an object goes through the one execution path,
-   where each protocol below, for each operation, describes what its
-   request and reply point to, and NULL where it takes or gives
-   nothing. A reply may be NULL whenever its result is not wanted. A
-   handle given in a reply is under the caller's jurisdiction to
-   release, and is NULL unless the call succeeds. */
+/* Registry.update and Associative.update share a method tag.
+   The protocol determines which arguments and results the method accepts. */
 enum rnt_protocol {
   RNT_PROTOCOL_DIRECTORY = 1,
   RNT_PROTOCOL_REGISTRY,
   RNT_PROTOCOL_ASSOCIATIVE,
   RNT_PROTOCOL_RELATION,
   RNT_PROTOCOL_CURSOR,
-  RNT_PROTOCOL_PROGRAM
-  // There are many more, but these for now are fine.
+  RNT_PROTOCOL_ENUMERABLE,
+  RNT_PROTOCOL_SCHEMATICS,
+  RNT_PROTOCOL_EXECUTABLE,
+  RNT_PROTOCOL_EVALUATOR,
+  RNT_PROTOCOL_INDEXED,
+  RNT_PROTOCOL_ADDRESSABLE,
+  RNT_PROTOCOL_ADMISSION,
+  RNT_PROTOCOL_SESSION
 };
 
-RNT_API enum rnt_status rnt_execute_protocol(const rnt_handle *handle,
+enum rnt_method {
+  RNT_METHOD_LIST = 1,
+  RNT_METHOD_FIND,
+  RNT_METHOD_UPDATE,
+  RNT_METHOD_CONTAINS,
+  RNT_METHOD_FETCH,
+  RNT_METHOD_ENUMERATE,
+  RNT_METHOD_DESCRIBE,
+  RNT_METHOD_INVOKE,
+  RNT_METHOD_PARSE,
+  RNT_METHOD_EVAL,
+  RNT_METHOD_MODES,
+  RNT_METHOD_INDEXES,
+  RNT_METHOD_LOOKUP,
+  RNT_METHOD_ADDRESS,
+  RNT_METHOD_CHECK,
+  RNT_METHOD_STATE,
+  RNT_METHOD_PIN,
+  RNT_METHOD_PLACE
+};
+
+/* Initialize to {0}. A reply owns its items and handles until freed or reused. */
+typedef struct {
+  const rnt_item *items;
+  size_t count;
+  void *storage; /* private, managed by librnt */
+} rnt_reply;
+
+/* The call borrows its arguments and may run an evaluator while it waits.
+   The receiver and arguments may come from the reply being reused.
+   Pass NULL to discard results. A failed call leaves the reply empty. */
+RNT_API enum rnt_status rnt_execute_protocol(const rnt_handle *receiver,
                                              enum rnt_protocol protocol,
-                                             int operation,
-                                             const void *request, void *reply);
+                                             enum rnt_method method,
+                                             const rnt_item *arguments,
+                                             size_t count, rnt_reply *reply);
 
-/* Directory
+RNT_API void rnt_reply_free(rnt_reply *reply);
 
-   LIST  request rnt_directory_list  reply NULL
-         The body runs once for each name, until one fails.
-   FIND  request char, the name      reply rnt_handle *, the child */
-enum rnt_directory_operation { RNT_DIRECTORY_LIST = 1, RNT_DIRECTORY_FIND };
-
-typedef enum rnt_status (*rnt_name_body)(const char *name, void *data);
-
-typedef struct {
-  rnt_name_body body;
-  void *data;
-} rnt_directory_list;
-
-/* Registry
-
-   UPDATE  request rnt_registry_update  reply NULL
-           Binds the name to the entry if it is bound to what was
-           expected, where NULL stands for nothing, and is refused
-           otherwise. A handle given stays the caller's to release. */
-enum rnt_registry_operation { RNT_REGISTRY_UPDATE = 1 };
-
-typedef struct {
-  const char *name;
-  const rnt_handle *expected;
-  const rnt_entry *entry;
-} rnt_registry_update;
-
-/* Associative
-
-   UPDATE  request rnt_associative_update  reply rnt_handle *
-           Gives a successor of the object in which the name is bound
-           to the entry given, or unbound where it is NULL. The
-           object itself does not change. */
-enum rnt_associative_operation { RNT_ASSOCIATIVE_UPDATE = 1 };
-
-typedef struct {
-  const char *name;
-  const rnt_entry *entry;
-} rnt_associative_update;
-
-/* Relation
-
-   CURSOR    request NULL                  reply rnt_handle *, the cursor
-   CONTAINS  request rnt_tuple             reply bool
-   HEADING   request rnt_relation_heading  reply NULL
-             The body runs once for each attribute, until one fails. */
-enum rnt_relation_operation {
-  RNT_RELATION_CURSOR = 1,
-  RNT_RELATION_CONTAINS,
-  RNT_RELATION_HEADING
-};
-
-typedef enum rnt_status (*rnt_attribute_body)(const rnt_attribute *attribute,
-                                              void *data);
-
-typedef struct {
-  rnt_attribute_body body;
-  void *data;
-} rnt_relation_heading;
-
-/* Cursor
-
-   FETCH  request rnt_cursor_fetch  reply bool, whether it is exhausted
-          The body runs once for each of the next tuples, at most limit
-          of them, until one fails. */
-enum rnt_cursor_operation { RNT_CURSOR_FETCH = 1 };
-
-typedef enum rnt_status (*rnt_tuple_body)(const rnt_tuple *tuple, void *data);
-
-typedef struct {
-  size_t limit;
-  rnt_tuple_body body;
-  void *data;
-} rnt_cursor_fetch;
-
-/* Program
-
-   EVALUATE  request rnt_program  reply rnt_handle *, the relation
-             Runs the source in the evaluator named, as
-             subsystem:language or as language alone for the system's,
-             with its paths read under the handle. */
-enum rnt_program_operation { RNT_PROGRAM_EVALUATE = 1 };
+/* Retains a root or reply handle. A borrowed callback handle yields NULL. */
+RNT_API rnt_handle *rnt_retain(const rnt_handle *handle);
 
 typedef struct {
   const char *evaluator;
@@ -262,28 +197,20 @@ typedef struct {
   size_t arity;
 } rnt_program;
 
-/* Evaluators
-
-   A subsystem offers an evaluator for a language of its own before it
-   starts, and the kernel binds it under the subsystem's root as
-   evaluator\language, so a program anywhere names it as
-   subsystem:language. Whenever such a program runs, the kernel asks
-   the subsystem to evaluate it. The body is given the program, whose
-   evaluator is the language, and the handle its paths are read under,
-   all lent for as long as it runs. It answers once with the relation
-   the program stands for, which is sent at once, and a handle answered
-   with stays the body's to release after. A body that returns without
-   answering refuses the evaluation, with its failure if it failed. */
 typedef struct rnt_answer rnt_answer;
 
+/* The callback borrows the program and the scope in which paths resolve. */
 typedef enum rnt_status (*rnt_evaluate_body)(const rnt_program *program,
                                              const rnt_handle *within,
                                              rnt_answer *answer, void *data);
 
-RNT_API enum rnt_status rnt_offer(const char *language,
-                                  rnt_evaluate_body body, void *data);
+/* Register each language once, before startup. */
+RNT_API enum rnt_status rnt_offer(const char *language, rnt_evaluate_body body,
+                                  void *data);
 
+/* Send one same-session handle or a relation or multigroup literal.
+   Returning from the callback without an answer refuses the evaluation. */
 RNT_API enum rnt_status rnt_answer_with(rnt_answer *answer,
-                                        const rnt_entry *relation);
+                                        const rnt_item *object);
 
 #endif

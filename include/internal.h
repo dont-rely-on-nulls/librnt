@@ -1,8 +1,6 @@
 /* SPDX-License-Identifier: LGPL-3.0-or-later
    Copyright 2026 Marcos Magueta <maguetamarcos@gmail.com> */
 
-/* internal.h: what librnt's sources share and its users never see. */
-
 #ifndef RNT_INTERNAL_H
 #define RNT_INTERNAL_H
 
@@ -12,11 +10,6 @@
 
 #include "wire.h"
 
-/* The plug
-
-   A process plugs into the kernel once, so there is one plug. It keeps
-   the channel, the evaluators offered and the sessions being served.
-   Once unplugged its channel is NULL and every call is disconnected. */
 typedef struct rnt_session rnt_session;
 
 typedef struct {
@@ -38,14 +31,9 @@ typedef struct {
   struct rnt_call *calls;
 } rnt_plug;
 
-// Past this the C stack is in trouble, so we refuse instead.
 enum { RNT_DEPTH_MAX = 64 };
 
-/* Sessions
-
-   One per client of the kernel, made the first time the kernel names
-   it. Handles are numbered per session and die with it: a closed
-   session disconnects every call, and is freed with its last handle. */
+/* Handles and active calls keep a closed session alive until their last release. */
 struct rnt_session {
   rnt_plug *plug;
   uint64_t id;
@@ -56,27 +44,22 @@ struct rnt_session {
 
 struct rnt_handle {
   uint64_t number;
+  size_t references; /* Zero marks a handle borrowed by an evaluator. */
   rnt_session *session;
 };
 
-// NULL when out of memory.
-rnt_session *rnt_session_of(rnt_plug *plug, uint64_t id);
+rnt_session *rnt_session_acquire(rnt_plug *plug, uint64_t id);
 void rnt_session_close(rnt_plug *plug, uint64_t id);
 void rnt_session_close_all(rnt_plug *plug);
 bool rnt_session_open(const rnt_session *session);
-void rnt_session_hold(rnt_session *session);
-void rnt_session_let_go(rnt_session *session);
+void rnt_session_retain(rnt_session *session);
+void rnt_session_release(rnt_session *session);
 
-rnt_handle *rnt_handle_make(rnt_session *session, uint64_t number);
+rnt_handle *rnt_handle_create(rnt_session *session, uint64_t number);
 
-// Of type 0 when the entry is trash, so it fits no schema.
-rnt_item rnt_item_of_entry(const rnt_session *session, const rnt_entry *entry);
+void rnt_write_argument(rnt_buffer *frame, const rnt_session *session,
+                        const rnt_item *item);
 
-/* The turn
-
-   A call waits for its answer, serving whatever the kernel asks in the
-   meantime. Serving does that until stopped, polling only for what has
-   already arrived. */
 enum rnt_status rnt_plug_call(rnt_plug *plug, const rnt_buffer *request,
                               uint64_t id, rnt_buffer *answer,
                               rnt_reader *results);

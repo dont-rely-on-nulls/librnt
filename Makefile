@@ -25,8 +25,7 @@ build/%.o: src/%.c
 	@mkdir -p $(@D)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -MMD -MP -c $< -o $@
 
-# Tests link the objects, so they obviously reach what the library
-# hides
+# Tests link the objects to reach private functions.
 build/tests/%: tests/%.c $(OBJECTS)
 	@mkdir -p $(@D)
 	$(CC) $(CPPFLAGS) -Isrc $(CFLAGS) -MMD -MP $< $(OBJECTS) -o $@
@@ -34,7 +33,6 @@ build/tests/%: tests/%.c $(OBJECTS)
 test: $(TESTS)
 	@for t in $^; do echo $$t; $$t || exit 1; done
 
-# Fuzzes the kernel's decoder until it finds a crash, or is stopped.
 fuzz:
 	@mkdir -p build/fuzz/corpus
 	clang $(CPPFLAGS) -std=c17 -g -O1 -fsanitize=fuzzer,address,undefined \

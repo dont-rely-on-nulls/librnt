@@ -14,7 +14,6 @@
 #include "wire.h"
 
 #ifdef _WIN32
-// To load less bloat
 #define WIN32_LEAN_AND_MEAN
 #include <wchar.h>
 #include <windows.h>
@@ -24,17 +23,19 @@ typedef HANDLE process;
 
 static const process NO_PROCESS = NULL;
 
-/* Takes ownership over the handle so our programs don't think the
-   pipe is theirs too. */
-static void claim(void) { _putenv("RNT_CHANNEL="); }
+static bool claim(endpoint at) {
+  return SetHandleInformation(at, HANDLE_FLAG_INHERIT, 0) != 0;
+}
+
+static void clear_channel_name(void) { _putenv("RNT_CHANNEL="); }
+
+static uint64_t milliseconds_now(void) { return GetTickCount64(); }
 
 static bool endpoint_of(unsigned long long number, endpoint *at) {
   *at = (HANDLE)(uintptr_t)number;
   return number <= UINTPTR_MAX;
 }
 
-/* A pipe with its other end closed fails with ERROR_BROKEN_PIPE, which
-   is an error to us as much as an EOF would be. */
 static long long transfer(endpoint at, void *bytes, size_t length,
                           bool writing) {
   DWORD chunk = length > MAXDWORD ? MAXDWORD : (DWORD)length;
@@ -45,18 +46,21 @@ static long long transfer(endpoint at, void *bytes, size_t length,
   return moved ? (long long)done : -1;
 }
 
-/* Peek fails once the other end is closed, which counts as pending
-   since receiving then fails as well. */
-// Windows can't wait on a pipe, so we keep peeking at it like idiots.
+/* A closed pipe is ready because the next receive can report disconnection. */
 static bool waiting(endpoint at, int milliseconds) {
-  DWORD available = 0;
+  uint64_t start = milliseconds_now();
+  DWORD available;
 
-  for (int waited = 0;; waited += 5) {
+  for (;;) {
     if (!PeekNamedPipe(at, NULL, 0, NULL, &available, NULL) || available > 0)
       return true;
-    if (waited >= milliseconds)
+    uint64_t elapsed = milliseconds_now() - start;
+    if (milliseconds >= 0 && elapsed >= (uint64_t)milliseconds)
       return false;
-    Sleep(5);
+    DWORD delay = 5;
+    if (milliseconds >= 0 && (uint64_t)milliseconds - elapsed < delay)
+      delay = (DWORD)((uint64_t)milliseconds - elapsed);
+    Sleep(delay);
   }
 }
 
@@ -74,7 +78,7 @@ static bool reap(process child, bool wait, int *code, bool *signaled) {
   return true;
 }
 
-static void slay(process child) { TerminateProcess(child, 1); }
+static void terminate_child(process child) { TerminateProcess(child, 1); }
 
 typedef struct {
   wchar_t *at;
@@ -83,7 +87,11 @@ typedef struct {
 } text;
 
 static void add(text *t, const wchar_t *chars, size_t count) {
-  if (!t->failed && t->length + count > t->capacity) {
+  if (t->failed || count > SIZE_MAX / (2 * sizeof *chars) - t->length) {
+    t->failed = true;
+    return;
+  }
+  if (t->length + count > t->capacity) {
     size_t capacity = (t->length + count) * 2;
     wchar_t *grown = realloc(t->at, capacity * sizeof *grown);
     t->failed = !grown;
@@ -105,7 +113,7 @@ static void backslashes(text *t, size_t count) {
     put(t, L'\\');
 }
 
-// CommandLineToArgvW's rules: backslashes only escape before a quote.
+/* Windows parses one command line back into separate arguments. */
 static void add_argument(text *line, const char *argument) {
   wchar_t wide[32768];
   size_t slashes = 0;
@@ -130,7 +138,7 @@ static void add_argument(text *line, const char *argument) {
     put(line, wide[i]);
     slashes = 0;
   }
-  // double the trailing ones, or they eat the closing quote
+  /* Double trailing backslashes to preserve them before the closing quote. */
   backslashes(line, slashes * 2);
   put(line, L'"');
 }
@@ -152,9 +160,8 @@ static void add_environment(text *block, HANDLE child) {
   put(block, L'\0');
 }
 
-// Only its end and the std handles. None of the kernel's other garbage.
-static bool start(HANDLE child, wchar_t *line, wchar_t *environment,
-                  process *started) {
+static bool start(HANDLE child, const wchar_t *program, wchar_t *line,
+                  wchar_t *environment, process *started) {
   HANDLE inherited[4] = {child};
   DWORD count = 1, flags;
   SIZE_T size = 0;
@@ -179,7 +186,7 @@ static bool start(HANDLE child, wchar_t *line, wchar_t *environment,
                                   PROC_THREAD_ATTRIBUTE_HANDLE_LIST, inherited,
                                   count * sizeof *inherited, NULL, NULL))
       created = CreateProcessW(
-          NULL, line, NULL, NULL, TRUE,
+          program, line, NULL, NULL, TRUE,
           EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT,
           environment, NULL, &startup.StartupInfo, &information);
     DeleteProcThreadAttributeList(startup.lpAttributeList);
@@ -201,7 +208,13 @@ static bool launch(const char *program, const char *const *arguments,
   text line = {0}, environment = {0};
   bool launched = false;
 
-  (void)program;
+  wchar_t executable[32768], resolved[32768];
+  if (!MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, program, -1,
+                           executable, 32768))
+    return false;
+  DWORD length = SearchPathW(NULL, executable, L".exe", 32768, resolved, NULL);
+  if (!length || length >= 32768)
+    return false;
   swprintf(name, 64, L"\\\\.\\pipe\\rnt-%lu-%ld", GetCurrentProcessId(),
            InterlockedIncrement(&made));
   server = CreateNamedPipeW(
@@ -218,7 +231,7 @@ static bool launch(const char *program, const char *const *arguments,
     put(&line, L'\0');
     add_environment(&environment, child);
     launched = !line.failed && !environment.failed &&
-               start(child, line.at, environment.at, started);
+               start(child, resolved, line.at, environment.at, started);
     CloseHandle(child);
   }
   free(line.at);
@@ -237,6 +250,7 @@ static bool launch(const char *program, const char *const *arguments,
 #include <spawn.h>
 #include <sys/socket.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 extern char **environ;
@@ -248,20 +262,27 @@ static const process NO_PROCESS = 0;
 
 enum { CHILD_END = 3 };
 
-static void quiet_sigpipe(void) {
-  struct sigaction current;
-  // If nobody has setup handling for sigpipe, ignore it. Writing to a
-  // pipe with the other end closes kills the program, normally, but
-  // ignoring the signal makes write return an error instead.
-  if (sigaction(SIGPIPE, NULL, &current) == 0 && current.sa_handler == SIG_DFL)
-    signal(SIGPIPE, SIG_IGN);
+static bool configure_socket(endpoint at) {
+#ifdef SO_NOSIGPIPE
+  int enabled = 1;
+  return setsockopt(at, SOL_SOCKET, SO_NOSIGPIPE, &enabled, sizeof enabled) ==
+         0;
+#else
+  (void)at;
+  return true;
+#endif
 }
 
-/* Takes ownership over the file descriptor so our programs don't
-   think the pipe is theirs too. */
-static void claim(void) {
-  unsetenv("RNT_CHANNEL");
-  quiet_sigpipe();
+static bool claim(endpoint at) {
+  return fcntl(at, F_SETFD, FD_CLOEXEC) == 0 && configure_socket(at);
+}
+
+static void clear_channel_name(void) { unsetenv("RNT_CHANNEL"); }
+
+static uint64_t milliseconds_now(void) {
+  struct timespec now;
+  clock_gettime(CLOCK_MONOTONIC, &now);
+  return (uint64_t)now.tv_sec * 1000 + (uint64_t)now.tv_nsec / 1000000;
 }
 
 static bool endpoint_of(unsigned long long number, endpoint *at) {
@@ -271,9 +292,14 @@ static bool endpoint_of(unsigned long long number, endpoint *at) {
 
 static long long transfer(endpoint at, void *bytes, size_t length,
                           bool writing) {
+#ifdef MSG_NOSIGNAL
+  const int flags = MSG_NOSIGNAL;
+#else
+  const int flags = 0;
+#endif
   ssize_t done;
   do {
-    done = writing ? write(at, bytes, length) : read(at, bytes, length);
+    done = writing ? send(at, bytes, length, flags) : read(at, bytes, length);
   } while (done < 0 && errno == EINTR);
   return done;
 }
@@ -281,8 +307,16 @@ static long long transfer(endpoint at, void *bytes, size_t length,
 static bool waiting(endpoint at, int milliseconds) {
   struct pollfd ready = {at, POLLIN, 0};
   int count;
+  uint64_t start = milliseconds_now();
+  int remaining = milliseconds;
   do {
-    count = poll(&ready, 1, milliseconds);
+    count = poll(&ready, 1, remaining);
+    if (count < 0 && errno == EINTR && milliseconds >= 0) {
+      uint64_t elapsed = milliseconds_now() - start;
+      if (elapsed >= (uint64_t)milliseconds)
+        return false;
+      remaining = milliseconds - (int)elapsed;
+    }
   } while (count < 0 && errno == EINTR);
   return count != 0;
 }
@@ -303,7 +337,7 @@ static bool reap(process child, bool wait, int *code, bool *signaled) {
   return true;
 }
 
-static void slay(process child) { kill(child, SIGKILL); }
+static void terminate_child(process child) { kill(child, SIGKILL); }
 
 static char **environment(void) {
   static char channel[] = "RNT_CHANNEL=3";
@@ -322,8 +356,7 @@ static char **environment(void) {
   return copy;
 }
 
-// dup2 onto itself keeps FD_CLOEXEC, so park the child's end above
-// CHILD_END before moving it there.
+/* Use distinct descriptors so dup2 clears FD_CLOEXEC on the child endpoint. */
 static bool launch(const char *program, const char *const *arguments,
                    endpoint *kernel, process *started) {
   int ends[2], child = -1;
@@ -331,10 +364,13 @@ static bool launch(const char *program, const char *const *arguments,
   char **env = NULL;
   bool launched = false;
 
-  quiet_sigpipe();
-  if (socketpair(AF_UNIX, SOCK_STREAM, 0, ends) != 0)
+  int type = SOCK_STREAM;
+#ifdef SOCK_CLOEXEC
+  type |= SOCK_CLOEXEC;
+#endif
+  if (socketpair(AF_UNIX, type, 0, ends) != 0)
     return false;
-  if (fcntl(ends[0], F_SETFD, FD_CLOEXEC) == 0)
+  if (claim(ends[0]))
     child = fcntl(ends[1], F_DUPFD_CLOEXEC, CHILD_END + 1);
   close(ends[1]);
   if (child >= 0 && (env = environment()) &&
@@ -361,25 +397,17 @@ struct rnt_channel {
   process child;
   bool reaped, signaled;
   int code;
+  enum rnt_status failure;
+  unsigned char header[4];
+  size_t header_used;
+  size_t body_size;
+  rnt_buffer incoming;
 };
 
-static bool all(rnt_channel *channel, void *bytes, size_t length,
-                bool writing) {
-  unsigned char *at = bytes;
-  while (length > 0) {
-    long long done = transfer(channel->at, at, length, writing);
-    if (done <= 0)
-      return false;
-    at += done;
-    length -= (size_t)done;
-  }
-  return true;
-}
-
-static rnt_channel *made(endpoint at, process child) {
+static rnt_channel *create_channel(endpoint at, process child) {
   rnt_channel *channel = malloc(sizeof *channel);
   if (channel)
-    *channel = (rnt_channel){at, child, false, false, 0};
+    *channel = (rnt_channel){.at = at, .child = child};
   return channel;
 }
 
@@ -391,9 +419,15 @@ rnt_channel *rnt_channel_open(void) {
     return NULL;
   errno = 0;
   unsigned long long number = strtoull(name, &end, 10);
-  bool named = !*end && !errno && endpoint_of(number, &at);
-  claim();
-  return named ? made(at, NO_PROCESS) : NULL;
+  bool named = strspn(name, "0123456789") == strlen(name) && !*end && !errno &&
+               endpoint_of(number, &at);
+  clear_channel_name();
+  if (!named)
+    return NULL;
+  rnt_channel *channel = claim(at) ? create_channel(at, NO_PROCESS) : NULL;
+  if (!channel)
+    finish(at);
+  return channel;
 }
 
 rnt_channel *rnt_channel_spawn(const char *program,
@@ -402,13 +436,13 @@ rnt_channel *rnt_channel_spawn(const char *program,
   process child = NO_PROCESS;
   rnt_channel *channel;
 
-  if (!program || !arguments || !arguments[0] ||
+  if (!program || !*program || !arguments || !arguments[0] ||
       !launch(program, arguments, &at, &child))
     return NULL;
-  if (!(channel = made(at, child))) {
+  if (!(channel = create_channel(at, child))) {
     int code;
     bool signaled;
-    slay(child);
+    terminate_child(child);
     reap(child, true, &code, &signaled);
     finish(at);
   }
@@ -427,38 +461,102 @@ bool rnt_channel_exited(rnt_channel *channel, bool wait, int *code,
 
 void rnt_channel_kill(rnt_channel *channel) {
   if (!channel->reaped && channel->child != NO_PROCESS)
-    slay(channel->child);
+    terminate_child(channel->child);
+}
+
+void rnt_channel_fail(rnt_channel *channel, enum rnt_status failure) {
+  if (!channel->failure) {
+    channel->failure = failure;
+    finish(channel->at);
+    rnt_buffer_free(&channel->incoming);
+  }
 }
 
 bool rnt_channel_send(rnt_channel *channel, const rnt_buffer *frame) {
-  return all(channel, frame->bytes, frame->length, true);
-}
-
-// Never trust the header. A garbage length costs nothing until the
-// bytes actually show up.
-bool rnt_channel_receive(rnt_channel *channel, rnt_buffer *frame) {
-  enum { STEP = 1 << 16 };
-  unsigned char header[4];
-
-  frame->length = 0;
-  frame->failure = 0;
-  if (!all(channel, header, sizeof header, false))
+  if (channel->failure)
     return false;
-  rnt_reader reader = rnt_reader_of(header, sizeof header);
-  size_t length = rnt_read_u32(&reader);
-  if (length > RNT_FRAME_MAX)
-    return false;
-  while (frame->length < length) {
-    size_t step = length - frame->length < STEP ? length - frame->length : STEP;
-    unsigned char *body = rnt_buffer_extend(frame, step);
-    if (!body || !all(channel, body, step, false))
+  size_t offset = 0;
+  while (offset < frame->length) {
+    long long sent = transfer(channel->at, frame->bytes + offset,
+                              frame->length - offset, true);
+    if (sent <= 0) {
+      rnt_channel_fail(channel, RNT_STATUS_DISCONNECTED);
       return false;
+    }
+    offset += (size_t)sent;
   }
   return true;
 }
 
+/* Keep partial input across polls so a timeout can fall anywhere in a frame. */
+static void read_chunk(rnt_channel *channel) {
+  if (channel->header_used < sizeof channel->header) {
+    long long n =
+        transfer(channel->at, channel->header + channel->header_used,
+                 sizeof channel->header - channel->header_used, false);
+    if (n <= 0) {
+      rnt_channel_fail(channel, RNT_STATUS_DISCONNECTED);
+      return;
+    }
+    channel->header_used += (size_t)n;
+    if (channel->header_used == sizeof channel->header) {
+      rnt_reader header =
+          rnt_reader_of(channel->header, sizeof channel->header);
+      channel->body_size = rnt_read_u32(&header);
+      if (!channel->body_size || channel->body_size > RNT_FRAME_MAX)
+        rnt_channel_fail(channel, RNT_STATUS_INVALID);
+    }
+    return;
+  }
+
+  enum { CHUNK = 64 * 1024 };
+  rnt_buffer *body = &channel->incoming;
+  size_t remaining = channel->body_size - body->length;
+  size_t count = remaining < CHUNK ? remaining : CHUNK;
+  unsigned char *dest = rnt_buffer_extend(body, count);
+  if (!dest) {
+    rnt_channel_fail(channel, body->failure);
+    return;
+  }
+  long long n = transfer(channel->at, dest, count, false);
+  if (n <= 0)
+    rnt_channel_fail(channel, RNT_STATUS_DISCONNECTED);
+  else
+    body->length -= count - (size_t)n;
+}
+
+static bool frame_ready(const rnt_channel *channel) {
+  return channel->failure ||
+         (channel->body_size && channel->incoming.length == channel->body_size);
+}
+
 bool rnt_channel_pending(rnt_channel *channel, int milliseconds) {
-  return waiting(channel->at, milliseconds);
+  uint64_t start = milliseconds_now();
+  int remaining = milliseconds;
+  while (!frame_ready(channel)) {
+    if (milliseconds >= 0 && !waiting(channel->at, remaining))
+      return false;
+    read_chunk(channel);
+    if (milliseconds > 0) {
+      uint64_t elapsed = milliseconds_now() - start;
+      if (elapsed >= (uint64_t)milliseconds)
+        return frame_ready(channel);
+      remaining = milliseconds - (int)elapsed;
+    }
+  }
+  return true;
+}
+
+enum rnt_status rnt_channel_receive(rnt_channel *channel, rnt_buffer *frame) {
+  rnt_channel_pending(channel, -1);
+  if (channel->failure)
+    return channel->failure;
+  rnt_buffer previous = *frame;
+  *frame = channel->incoming;
+  channel->incoming = previous;
+  channel->incoming.length = 0;
+  channel->header_used = channel->body_size = 0;
+  return RNT_STATUS_OK;
 }
 
 void rnt_channel_close(rnt_channel *channel) {
@@ -467,7 +565,7 @@ void rnt_channel_close(rnt_channel *channel) {
 
   if (!channel)
     return;
-  finish(channel->at);
+  rnt_channel_fail(channel, RNT_STATUS_DISCONNECTED);
   rnt_channel_kill(channel);
   rnt_channel_exited(channel, true, &code, &signaled);
   free(channel);
